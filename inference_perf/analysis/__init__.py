@@ -13,5 +13,6 @@
 # limitations under the License.
 
 from .analyze import analyze_reports
+from .workload_classifier import WorkloadClassifier, load_policy, load_otel_trace
 
-__all__ = ["analyze_reports"]
+__all__ = ["analyze_reports", "WorkloadClassifier", "load_policy", "load_otel_trace"]

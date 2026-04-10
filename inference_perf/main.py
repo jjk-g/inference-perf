@@ -121,6 +121,9 @@ def main_cli() -> None:
     parser.add_argument(
         "--log-level", help="Logging level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
     )
+    parser.add_argument("--classify-trace", help="Path to trace file for workload classification", required=False)
+    parser.add_argument("--classify-config", help="Path to YAML classification config file", required=False)
+    parser.add_argument("--classify-format", default="jsonl", choices=["jsonl", "otel"], help="Trace file format for classification")
 
     add_pydantic_args(parser, Config)
 
@@ -130,6 +133,27 @@ def main_cli() -> None:
 
     if args.analyze and len(args.analyze) > 0:
         analyze_reports(args.analyze, args.unified_analysis_dir)
+        return
+
+    if args.classify_trace or args.classify_config:
+        if not (args.classify_trace and args.classify_config):
+            parser.error("Both --classify-trace and --classify-config must be provided together.")
+            
+        from inference_perf.analysis import WorkloadClassifier, load_policy, load_otel_trace
+        import polars as pl
+        import json
+        
+        print(f"Running workload classification on {args.classify_trace}")
+        policy = load_policy(args.classify_config)
+        classifier = WorkloadClassifier(policy)
+        
+        if args.classify_format == "otel":
+            df = load_otel_trace(args.classify_trace)
+        else:
+            df = pl.scan_ndjson(args.classify_trace)
+            
+        card = classifier.classify(df)
+        print(json.dumps(card, indent=2))
         return
 
     base_args = {"config_file", "analyze", "unified_analysis_dir", "log_level"}
