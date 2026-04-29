@@ -1,0 +1,19 @@
+{
+  "skills": {
+    "benchmark_vllm": "library/skills/benchmark_vllm_v1.md",
+    "general_worker": "library/skills/general_worker_v1.md",
+    "inference-perf": "library/skills/inference-perf_v1.md"
+  },
+  "knowledge": {
+    "aipa": {
+      "workflow": "library/knowledge/aipa/workflow/knowledge.md",
+      "manifest-generation": "library/knowledge/aipa/manifest-generation/knowledge.md"
+    },
+    "models": {
+      "gemma": "library/knowledge/models/gemma/knowledge.md"
+    },
+    "library": {
+      "catalog": "library/knowledge/library/catalog/knowledge.md"
+    }
+  }
+}
