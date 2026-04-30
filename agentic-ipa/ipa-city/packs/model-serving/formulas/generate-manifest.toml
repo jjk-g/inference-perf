@@ -1,0 +1,19 @@
+description = """
+Generate K8s deployment manifests for model servers using Kustomize.
+"""
+formula = "generate-manifest"
+version = 1
+
+[[steps]]
+id = "generate-vllm"
+title = "Generate vLLM Manifest"
+description = """
+Run kustomize build on the vLLM overlay to generate the manifest:
+
+```bash
+cd overlays/kustomize/vllm
+kustomize build . > ../../../generated-vllm-manifest.yaml
+```
+
+Verify that the file was created and contains valid YAML.
+"""

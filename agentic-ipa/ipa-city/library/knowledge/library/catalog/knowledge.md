@@ -8,9 +8,13 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmark_vllm**: Instructions for benchmarking a vLLM server using `inference-perf`.
 - **core.gc-work**: Finding, creating, claiming, and closing work items (beads) using the `bd` tool.
 - **delegate_tasks**: How to delegate sub-tasks in the AIPA workflow using the `bd` tool.
+- **dog-doctor-skill**: Comprehensive health checks on a Dolt SQL server.
+- **dolt-backup**: Synchronizing Dolt databases to backup remotes.
 - **general_worker**: The core workflow for finding, claiming, and finishing work using `bd`.
 - **generate_manifest**: How to generate Kubernetes deployment manifests for model servers using Kustomize.
 - **inference-perf**: General process for running inference performance tests using the `inference-perf` tool.
+- **phantom-db-scan-skill**: Detecting and quarantining phantom Dolt databases.
+- **stale-db-scan-skill**: Detecting and cleaning up stale or orphaned test databases.
 - **wait_healthy**: How to wait for a deployed model server to be healthy and ready.
 
 ## Knowledge Domains

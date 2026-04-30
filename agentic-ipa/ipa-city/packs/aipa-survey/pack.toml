@@ -1,0 +1,15 @@
+[pack]
+name = "aipa-survey"
+schema = 2
+
+[imports.serving]
+source = "../model-serving"
+
+[imports.deploy]
+source = "../k8s-deploy"
+
+[imports.perf]
+source = "../inference-perf"
+
+[imports.analysis]
+source = "../perf-analysis"

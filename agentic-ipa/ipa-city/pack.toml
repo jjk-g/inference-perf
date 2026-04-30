@@ -1,0 +1,17 @@
+[pack]
+name = "ipa-city"
+schema = 2
+
+[imports]
+[imports.aipa_survey_packs]
+source = "packs/aipa-survey"
+
+[providers]
+[providers.gemini]
+base = "builtin:gemini"
+command = "gemini"
+args = ["--approval-mode", "yolo", "--proxy_healthz_timeout", "120", "--gaia_credential_exchanger_backend_deadline", "120"]
+ready_delay_ms = 0
+
+[formulas]
+dir = "formulas"

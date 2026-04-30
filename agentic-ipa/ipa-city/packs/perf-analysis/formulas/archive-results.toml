@@ -1,0 +1,8 @@
+formula = "archive-results"
+version = 1
+description = "Archive benchmark results."
+
+[[steps]]
+id = "archive"
+title = "Archive Results"
+description = "Save results and update the central index."

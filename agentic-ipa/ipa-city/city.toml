@@ -1,0 +1,18 @@
+[workspace]
+provider = "gemini"
+
+[providers.gemini]
+command = "/usr/local/google/home/jkramberger/agentic-ipa/ipa-city/gemini_wrapper.sh"
+args = ["--approval-mode", "yolo", "--proxy_healthz_timeout", "120", "--gaia_credential_exchanger_backend_deadline", "120"]
+base = "builtin:gemini"
+
+[session]
+startup_timeout = "5m"
+
+[imports.aipa_survey_packs]
+source = "packs/aipa-survey"
+
+[formulas]
+dir = "formulas"
+
+

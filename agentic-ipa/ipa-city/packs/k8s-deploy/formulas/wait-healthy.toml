@@ -1,0 +1,8 @@
+formula = "wait-healthy"
+version = 1
+description = "Wait for a deployment to become healthy."
+
+[[steps]]
+id = "wait"
+title = "Wait for Healthy"
+description = "Run kubectl rollout status and check health endpoint."

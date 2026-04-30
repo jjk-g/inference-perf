@@ -12,20 +12,23 @@ Manifest generation is the first step in the AIPA (Agentic Inference Profile Aut
 
 The standard process for generating a vLLM manifest is:
 
-1. **Navigate to the vLLM overlay directory**:
+1. **Navigate to the specific model overlay directory**:
+   Navigate to the directory containing the `kustomization.yaml` file (often in a `gke` subdirectory).
+   Example for Gemma 4:
    ```bash
-   cd overlays/kustomize/vllm
+   cd packs/model-serving/overlays/kustomize/vllm/gemma4-vllm/gke
    ```
 
 2. **Run Kustomize build**:
+   Redirect the output to the `packs/model-serving` directory.
    ```bash
-   kustomize build . > ../../../generated-vllm-manifest.yaml
+   kustomize build . > ../../../../../generated-vllm-gemma4-vllm.yaml
    ```
 
 3. **Verify Output**:
-   Ensure that `generated-vllm-manifest.yaml` has been created in the expected location and contains valid Kubernetes resource definitions.
+   Ensure that the generated YAML file has been created and contains valid Kubernetes resource definitions.
 
 ## Key Paths
 
-- **Source Overlays**: `overlays/kustomize/vllm` (and other model-specific overlays)
-- **Output Manifest**: `generated-vllm-manifest.yaml` (usually at the project root or specified output path)
+- **Source Overlays**: `packs/model-serving/overlays/kustomize/vllm/<model>`
+- **Output Manifest**: `packs/model-serving/generated-vllm-<model>.yaml`

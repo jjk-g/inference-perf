@@ -1,0 +1,10 @@
+- op: add
+  path: /metadata/name
+  value: gemma4-vllm-vllm-hpa
+- op: add
+  path: /metadata/labels
+  value:
+    app: gemma4-vllm-vllm-inference-server
+- op: add
+  path: /spec/metrics/0/pods/target/averageValue
+  value: 50

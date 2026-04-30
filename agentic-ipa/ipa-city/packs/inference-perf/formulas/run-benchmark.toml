@@ -1,0 +1,8 @@
+formula = "run-benchmark"
+version = 1
+description = "Run a performance benchmark against the deployed model."
+
+[[steps]]
+id = "benchmark"
+title = "Run Benchmark"
+description = "Run the ipa-cli benchmarking tool against the healthy endpoint and save the results."

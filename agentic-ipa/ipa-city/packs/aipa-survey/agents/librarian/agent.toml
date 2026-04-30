@@ -1,0 +1,3 @@
+max_active_sessions = 1
+min_active_sessions = 1
+nudge = "Please check for research requests."

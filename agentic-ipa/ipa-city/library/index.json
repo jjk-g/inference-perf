@@ -9,7 +9,9 @@
     "wait_healthy": "library/skills/wait_healthy_v1.md",
     "core.gc-work": "library/skills/core.gc-work_v1.md",
     "dolt-backup": "library/skills/dolt-backup_v1.md",
-    "dog-doctor-skill": "library/skills/dog-doctor-skill_v1.md"
+    "dog-doctor-skill": "library/skills/dog-doctor-skill_v1.md",
+    "phantom-db-scan-skill": "library/skills/phantom-db-scan-skill_v1.md",
+    "stale-db-scan-skill": "library/skills/stale-db-scan-skill_v1.md"
   },
   "knowledge": {
     "dolt": {

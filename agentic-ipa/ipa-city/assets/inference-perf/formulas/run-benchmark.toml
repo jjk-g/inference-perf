@@ -1,0 +1,19 @@
+description = """
+Run inference performance tests against the model server.
+"""
+formula = "run-benchmark"
+version = 1
+
+[[steps]]
+id = "benchmark"
+title = "Run Benchmark"
+description = """
+Run the load generator from source using PDM.
+The command uses the `inference-perf` project in the workspace.
+
+```bash
+pdm --project /usr/local/google/home/jkramberger/agentic-ipa/inference-perf run inference-perf --server.type vllm --server.base_url http://localhost:8000 --data.type random --load.type constant --load.stages '[{"rate": 10, "duration": 60}]' --api.streaming true
+```
+
+The tool likely generates a report file. Locate the generated report (check for a `reports` directory or a new file in the CWD) and rename it or copy it to `results.json` so the next step can find it.
+"""

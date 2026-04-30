@@ -1,0 +1,8 @@
+formula = "apply-manifest"
+version = 1
+description = "Apply a generated K8s manifest."
+
+[[steps]]
+id = "apply"
+title = "Apply Manifest"
+description = "Run kubectl apply -f the generated manifest."

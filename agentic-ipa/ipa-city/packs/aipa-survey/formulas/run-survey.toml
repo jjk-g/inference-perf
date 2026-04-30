@@ -1,0 +1,62 @@
+description = """
+Full pipeline to generate, deploy, benchmark, and analyze a model server.
+This is an **overseer formula** — the agent executing this formula (e.g., the Mayor)
+should not run the commands directly but should delegate them to specialized workers.
+This formula is dynamic and expects a `model` variable.
+"""
+formula = "run-survey"
+version = 4
+
+[vars]
+model = { description = "Model name to survey", required = true }
+benchmark_desc = { description = "Description of the benchmark to run", default = "Standard performance survey" }
+
+[[steps]]
+id = "delegate-generation"
+title = "1. Delegate Manifest Generation"
+description = """
+Instruct the agent to create a task for manifest generation for the model {{.model}}.
+Example using `bd`:
+```bash
+bd create "Generate manifest for {{.model}}" --label formula=generate-manifest
+```
+Wait for the worker to complete this task and record the manifest path in the store.
+"""
+
+[[steps]]
+id = "delegate-deployment"
+title = "2. Delegate Deployment"
+description = """
+Once the manifest is generated, instruct the agent to create tasks for deployment and health check.
+Example using `bd`:
+```bash
+bd create "Deploy {{.model}}" --label formula=apply-manifest
+```
+bd create "Health check {{.model}}" --label formula=wait-healthy
+```
+Wait for these tasks to be completed by the deployment worker.
+"""
+
+[[steps]]
+id = "delegate-benchmarking"
+title = "3. Delegate Benchmarking"
+description = """
+Once the server is healthy, instruct the agent to create a task for running the benchmark.
+Include the benchmark description to inform the worker: "{{.benchmark_desc}}".
+Example using `bd`:
+```bash
+bd create "Benchmark {{.model}} - {{.benchmark_desc}}" --label formula=run-benchmark
+```
+Wait for the testing worker to complete the run and save results.
+"""
+
+[[steps]]
+id = "delegate-archiving"
+title = "4. Delegate Archiving"
+description = """
+Once benchmarking is complete, instruct the agent to create a task for archiving and indexing.
+Example using `bd`:
+```bash
+bd create "Archive results for {{.model}}" --label formula=archive-results
+```
+"""
