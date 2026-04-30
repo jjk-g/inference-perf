@@ -25,6 +25,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmarks/gemma4-vllm**: Performance results and metrics for the gemma4-vllm model deployment.
 - **benchmarks/llama3-8b**: Performance results and metrics for the llama3-8b model deployment.
 - **benchmarks/llama3-70b**: Performance results and metrics for the llama3-70b model deployment.
+- **benchmarks/llama-3-1-8b-instruct**: Performance results and metrics for the Llama 3.1 8B Instruct model.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
 - **aipa/manifests**: Inventory of available Kubernetes manifests for model servers.
@@ -33,6 +34,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **models/gemma**: Information about the Gemma model family and configurations.
 - **models/llama3**: Details and configuration for Llama3 models (8b, 70b).
 - **models/llama3_1**: Details and configuration for Llama3.1 models (8b).
+- **models/mistral**: Information about the Mistral model family.
 - **dolt/connectivity**: Information about Dolt SQL server connectivity and probing.
 - **work/available**: Summary of current backlog and work strategies for worker agents.
 - **library/catalog**: (This file) The index of all available skills and knowledge.
