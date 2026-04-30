@@ -1,11 +1,12 @@
 # Available Work for Workers
 
-This document summarizes the current status of work available for Worker agents in Gas City as of 2026-04-30 07:40Z.
+This document summarizes the current status of work available for Worker agents in Gas City as of 2026-04-30 09:10Z.
 
 ## Current Backlog Status
 
 As of today, the ready work items include:
-- **NEW**: **Gemma-2B Pipeline**. The manifest `generated-vllm-gemma-2b.yaml` is available in the root. Deployment is currently in progress. This is the top priority.
+- **IN PROGRESS**: **Gemma-7B-it Pipeline**. Deployment complete, currently waiting for health check.
+- **IN PROGRESS**: **Gemma-2B Pipeline**. The manifest `generated-vllm-gemma-2b.yaml` is available in the root. Deployment is currently in progress.
 - **Verification**: Check library consistency and audit skills. Ongoing.
 
 ### Completed Tasks
