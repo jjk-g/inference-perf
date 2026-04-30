@@ -49,3 +49,5 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **2026-04-30**: Library consistency verified. All benchmarks (Gemma, Llama, Mistral) are indexed.
 - **2026-04-30**: Skill audit complete. `benchmark_vllm` and `inference-perf` updated with port best practices (avoiding 8001).
 - **2026-04-30**: Library updated with JetStream GPU manifest and manifest cleanup instructions added to `apply_manifest` skill.
+- **2026-04-30**: Archived new vLLM benchmark results for Llama 3 8B and Gemma 7B-it, replacing older runs. All library indices are consistent.
+- **2026-04-30**: Updated `generate_manifest` and `archive_results` skills with explicit permission for workers to write to the library when following these skills.

@@ -1,4 +1,4 @@
-# Gemma-2b
+# Gemma-7b-it
 
 ## Configuration
 | Kind | Model Server | Model | Provider | Accelerator |

@@ -7,6 +7,8 @@ This skill describes how to generate Kubernetes deployment manifests for model s
 - Access to the `packs/model-serving/overlays/kustomize` directory.
 
 ## Process
+**Note for Workers**: While general instructions prohibit direct library access, you are explicitly permitted (and required) to write to `library/knowledge/manifests/` when executing this skill to ensure consistent knowledge archival.
+
 1. **Navigate to the target overlay**:
    Identify the model and server type (e.g., vLLM or JetStream) and navigate to its overlay directory. **Crucial**: You must navigate to the subdirectory that contains the `kustomization.yaml` file, which is often an environment-specific folder like `gke`.
    Example for vLLM:

@@ -14,7 +14,7 @@ data:
     max: 1024
     mean: 512.0
     std_dev: 200.0
-    total_count: 301
+    total_count: 61
     type: uniform
     variance: null
     skew: 0.0
@@ -23,7 +23,7 @@ data:
     max: 256
     mean: 128.0
     std_dev: 200.0
-    total_count: 301
+    total_count: 61
     type: uniform
     variance: null
     skew: 0.0
@@ -35,8 +35,8 @@ load:
   type: constant
   interval: 1.0
   stages:
-  - rate: 5.0
-    duration: 60
+  - rate: 2.0
+    duration: 30
     num_requests: null
     concurrency_level: null
   sweep: null
@@ -47,7 +47,7 @@ load:
   circuit_breakers: []
   request_timeout: null
   lora_traffic_split: null
-  base_seed: 1777537705892
+  base_seed: 1777562944561
 metrics: null
 report:
   request_lifecycle:
@@ -78,17 +78,20 @@ report:
   goodput: null
 storage:
   local_storage:
-    path: reports-20260430-082825
+    path: reports-20260430-152904
     report_file_prefix: null
   google_cloud_storage: null
   simple_storage_service: null
 server:
   type: vllm
-  model_name: null
+  model_name: meta-llama/Meta-Llama-3-8B
   base_url: http://localhost:8005
   ignore_eos: true
   api_key: null
   cert_path: null
   key_path: null
-tokenizer: null
+tokenizer:
+  pretrained_model_name_or_path: meta-llama/Meta-Llama-3-8B
+  trust_remote_code: null
+  token: null
 circuit_breakers: null

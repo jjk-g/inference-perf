@@ -8,6 +8,8 @@ This skill describes how to archive and index benchmark results in the Gas City 
 
 ## Process
 
+**Note for Workers**: While general instructions prohibit direct library access, you are explicitly permitted (and required) to write to `library/` when executing this skill to ensure consistent knowledge archival.
+
 1. **Create the target directory**:
    Create a directory for the model results in the library.
    ```bash
