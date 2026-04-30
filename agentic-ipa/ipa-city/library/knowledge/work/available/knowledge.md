@@ -28,8 +28,9 @@ Status of active pipelines:
 4.  **Gemma4-VLLM**: Completed and archived.
 5.  **Gemma-7B-it**: Completed and archived.
 6.  **Llama-3.1-8B-Instruct**: Completed and archived.
-7.  **Mistral-7B-v0.3**: Active (Manifest Generation in progress).
-8.  **Mayor Status**: The Mayor (ic-dxp) is active and overseeing city operations.
+7.  **Mistral-7B-v0.3**: Completed and archived.
+8.  **Llama-3.1-70B**: Proposed for next survey.
+9.  **Mayor Status**: The Mayor (ic-dxp) is active and overseeing city operations.
 
 ## Formulas and Structured Workflows
 
