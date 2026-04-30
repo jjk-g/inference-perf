@@ -23,7 +23,8 @@
       "gemma4-vllm": "library/knowledge/benchmarks/gemma4-vllm/summary_lifecycle_metrics.json",
       "gemma-2b": "library/knowledge/benchmarks/gemma-2b/summary_lifecycle_metrics.json",
       "llama3-8b": "library/knowledge/benchmarks/llama3-8b/summary_lifecycle_metrics.json",
-      "llama3-70b": "library/knowledge/benchmarks/llama3-70b/summary_lifecycle_metrics.json"
+      "llama3-70b": "library/knowledge/benchmarks/llama3-70b/summary_lifecycle_metrics.json",
+      "llama-3-1-8b-instruct": "library/knowledge/benchmarks/llama-3-1-8b-instruct/summary_lifecycle_metrics.json"
     },
     "aipa": {
       "workflow": "library/knowledge/aipa/workflow/knowledge.md",
@@ -34,7 +35,8 @@
     "models": {
       "gemma": "library/knowledge/models/gemma/knowledge.md",
       "llama3": "library/knowledge/models/llama3/knowledge.md",
-      "llama3_1": "library/knowledge/models/llama3_1/knowledge.md"
+      "llama3_1": "library/knowledge/models/llama3_1/knowledge.md",
+      "mistral": "library/knowledge/models/mistral/knowledge.md"
     },
     "library": {
       "catalog": "library/knowledge/library/catalog/knowledge.md"
