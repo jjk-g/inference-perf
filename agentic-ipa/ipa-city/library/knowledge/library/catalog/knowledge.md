@@ -26,6 +26,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmarks/llama3-8b**: Performance results and metrics for the llama3-8b model deployment.
 - **benchmarks/llama3-70b**: Performance results and metrics for the llama3-70b model deployment.
 - **benchmarks/llama-3-1-8b-instruct**: Performance results and metrics for the Llama 3.1 8B Instruct model.
+- **benchmarks/mistral-7b-v0.3**: Performance results and metrics for the Mistral-7B-v0.3 model.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
 - **aipa/manifests**: Inventory of available Kubernetes manifests for model servers.

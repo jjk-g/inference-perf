@@ -24,7 +24,8 @@
       "gemma-2b": "library/knowledge/benchmarks/gemma-2b/summary_lifecycle_metrics.json",
       "llama3-8b": "library/knowledge/benchmarks/llama3-8b/summary_lifecycle_metrics.json",
       "llama3-70b": "library/knowledge/benchmarks/llama3-70b/summary_lifecycle_metrics.json",
-      "llama-3-1-8b-instruct": "library/knowledge/benchmarks/llama-3-1-8b-instruct/summary_lifecycle_metrics.json"
+      "llama-3-1-8b-instruct": "library/knowledge/benchmarks/llama-3-1-8b-instruct/summary_lifecycle_metrics.json",
+      "mistral-7b-v0.3": "library/knowledge/benchmarks/mistral-7b-v0.3/summary_lifecycle_metrics.json"
     },
     "aipa": {
       "workflow": "library/knowledge/aipa/workflow/knowledge.md",
