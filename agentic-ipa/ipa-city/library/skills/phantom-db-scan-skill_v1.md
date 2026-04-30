@@ -7,23 +7,30 @@ A phantom database is a directory in the Dolt data directory (default `.dolt-dat
 
 ## Process
 
+### 0. Verify Data Directory
+Before scanning, ensure the Dolt data directory exists.
+```bash
+# Check for common data directory locations
+[ -d .dolt-data ] || [ -d .beads/dolt ] || echo "Warning: No Dolt data directory found."
+```
+
 ### 1. Scan for Phantoms
-List all directories in the data directory and check for the phantom condition.
+List all directories in the data directory and check for the phantom condition. The data directory is typically `.dolt-data/` or `.beads/dolt/`.
 
 ```bash
 # List directories
-ls -d .dolt-data/*/
-
-# Check for phantom condition for each directory <dir>:
-# If <dir>/.dolt/ exists AND <dir>/.dolt/noms/manifest does NOT exist:
-# -> Phantom detected
+ls -d .beads/dolt/*/
+```
+# Sample command to check for manifests across all databases:
+# ls -a .beads/dolt/*/.dolt/noms/manifest
+# If a directory is missing the manifest, it's a phantom.
 ```
 
 ### 2. Quarantine (Removal)
 Remove the corrupted directory to prevent server crashes.
 
 ```bash
-rm -rf .dolt-data/<phantom-name>
+rm -rf .beads/dolt/<phantom-name>
 ```
 *Note: This is safe because phantom directories have no valid data.*
 

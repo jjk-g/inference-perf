@@ -11,11 +11,16 @@
     "dolt-backup": "library/skills/dolt-backup_v1.md",
     "dog-doctor-skill": "library/skills/dog-doctor-skill_v1.md",
     "phantom-db-scan-skill": "library/skills/phantom-db-scan-skill_v1.md",
-    "stale-db-scan-skill": "library/skills/stale-db-scan-skill_v1.md"
+    "stale-db-scan-skill": "library/skills/stale-db-scan-skill_v1.md",
+    "archive_results": "library/skills/archive_results_v1.md"
   },
   "knowledge": {
     "dolt": {
       "connectivity": "library/knowledge/dolt/connectivity/knowledge.md"
+    },
+    "benchmarks": {
+      "gemma4-vllm": "library/knowledge/benchmarks/gemma4-vllm/summary_lifecycle_metrics.json",
+      "llama3-8b": "library/knowledge/benchmarks/llama3-8b/summary_lifecycle_metrics.json"
     },
     "aipa": {
       "workflow": "library/knowledge/aipa/workflow/knowledge.md",

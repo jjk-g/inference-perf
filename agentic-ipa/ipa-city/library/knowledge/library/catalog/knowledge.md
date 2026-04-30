@@ -16,9 +16,12 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **phantom-db-scan-skill**: Detecting and quarantining phantom Dolt databases.
 - **stale-db-scan-skill**: Detecting and cleaning up stale or orphaned test databases.
 - **wait_healthy**: How to wait for a deployed model server to be healthy and ready.
+- **archive_results**: How to archive and index benchmark results in the Gas City Library.
 
 ## Knowledge Domains
 
+- **benchmarks/gemma4-vllm**: Performance results and metrics for the gemma4-vllm model deployment.
+- **benchmarks/llama3-8b**: Performance results and metrics for the llama3-8b model deployment.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
 - **aipa/run-survey**: Overseer formula for coordinating the full lifecycle of model performance evaluation.
