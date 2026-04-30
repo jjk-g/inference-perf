@@ -1,16 +1,24 @@
 {
   "skills": {
+    "apply_manifest": "library/skills/apply_manifest_v1.md",
     "benchmark_vllm": "library/skills/benchmark_vllm_v1.md",
+    "delegate_tasks": "library/skills/delegate_tasks_v1.md",
     "general_worker": "library/skills/general_worker_v1.md",
-    "inference-perf": "library/skills/inference-perf_v1.md"
+    "generate_manifest": "library/skills/generate_manifest_v1.md",
+    "inference-perf": "library/skills/inference-perf_v1.md",
+    "wait_healthy": "library/skills/wait_healthy_v1.md",
+    "core.gc-work": "library/skills/core.gc-work_v1.md"
   },
   "knowledge": {
     "aipa": {
       "workflow": "library/knowledge/aipa/workflow/knowledge.md",
-      "manifest-generation": "library/knowledge/aipa/manifest-generation/knowledge.md"
+      "manifest-generation": "library/knowledge/aipa/manifest-generation/knowledge.md",
+      "model-benchmark-pipeline": "library/knowledge/aipa/model-benchmark-pipeline/knowledge.md",
+      "formulas": "library/knowledge/aipa/formulas/knowledge.md"
     },
     "models": {
-      "gemma": "library/knowledge/models/gemma/knowledge.md"
+      "gemma": "library/knowledge/models/gemma/knowledge.md",
+      "llama3-8b": "library/knowledge/models/llama3-8b/knowledge.md"
     },
     "library": {
       "catalog": "library/knowledge/library/catalog/knowledge.md"
