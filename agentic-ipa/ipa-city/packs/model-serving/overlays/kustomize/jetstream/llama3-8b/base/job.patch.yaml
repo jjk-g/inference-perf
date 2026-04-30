@@ -28,4 +28,4 @@ spec:
         - name: huggingface-credentials
           secret:
             defaultMode: 0400
-            secretName: huggingface-secret
+            secretName: hf-secret
