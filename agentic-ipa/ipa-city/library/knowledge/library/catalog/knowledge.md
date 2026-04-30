@@ -22,7 +22,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 - **benchmarks/gemma-7b-it**: Performance results and metrics for the gemma-7b-it model deployment.
 - **benchmarks/gemma-2b**: Performance results and metrics for the gemma-2b model deployment.
-- **benchmarks/gemma4-vllm**: Performance results and metrics for the gemma4-vllm model deployment.
+- **benchmarks/gemma4-vllm**: Performance results for gemma4-vllm. Achieved 6294.37 total tokens/sec with a 95.2% success rate (571/600 requests).
 - **benchmarks/llama3-8b**: Performance results and metrics for the llama3-8b model deployment.
 - **benchmarks/llama3-70b**: Performance results and metrics for the llama3-70b model deployment.
 - **benchmarks/llama-3-1-8b-instruct**: Performance results and metrics for the Llama 3.1 8B Instruct model.

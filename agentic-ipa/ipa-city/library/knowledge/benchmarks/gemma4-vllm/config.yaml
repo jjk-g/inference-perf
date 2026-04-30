@@ -11,20 +11,20 @@ data:
   path: null
   input_distribution:
     min: 128
-    max: 128
-    mean: 128.0
+    max: 1024
+    mean: 512.0
     std_dev: 200.0
     total_count: 601
-    type: fixed
+    type: uniform
     variance: null
     skew: 0.0
   output_distribution:
-    min: 128
-    max: 128
+    min: 16
+    max: 256
     mean: 128.0
     std_dev: 200.0
     total_count: 601
-    type: fixed
+    type: uniform
     variance: null
     skew: 0.0
   shared_prefix: null
@@ -47,7 +47,7 @@ load:
   circuit_breakers: []
   request_timeout: null
   lora_traffic_split: null
-  base_seed: 1777529459483
+  base_seed: 1777545656885
 metrics: null
 report:
   request_lifecycle:
@@ -78,7 +78,7 @@ report:
   goodput: null
 storage:
   local_storage:
-    path: reports-20260430-061059
+    path: reports-20260430-104056
     report_file_prefix: null
   google_cloud_storage: null
   simple_storage_service: null
