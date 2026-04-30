@@ -52,7 +52,7 @@ spec:
         - ici_tensor_parallelism=1
         - scan_layers=false
         - weight_dtype=bfloat16
-        - load_parameters_path=gs://$BUCKET_NAME/final/unscanned/gemma_7b-it/0/checkpoints/0/items
+        - load_parameters_path=gs://llama3-8b-jetstream/final/unscanned/gemma_7b-it/0/checkpoints/0/items
         - prometheus_port=9100
         env:
         - name: TENSOR_PARALLEL_SIZE
@@ -91,7 +91,7 @@ spec:
     spec:
       containers:
       - args:
-        - -b=$BUCKET_NAME
+        - -b=llama3-8b-jetstream
         - -m=google/gemma/maxtext/7b-it/2
         image: us-docker.pkg.dev/cloud-tpu-images/inference/inference-checkpoint:v0.2.2
         name: inference-checkpoint

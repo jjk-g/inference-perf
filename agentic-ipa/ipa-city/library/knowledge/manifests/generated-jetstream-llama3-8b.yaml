@@ -81,7 +81,7 @@ spec:
           driver: gcsfuse.csi.storage.gke.io
           readOnly: true
           volumeAttributes:
-            bucketName: $BUCKET_NAME
+            bucketName: llama3-8b-jetstream
             mountOptions: implicit-dirs
         name: gcs-fuse-checkpoint
 ---
@@ -102,7 +102,7 @@ spec:
       - args:
         - -s=jetstream-pytorch
         - -m=meta-llama/Meta-Llama-3-8B
-        - -o=gs://$BUCKET_NAME/pytorch/llama3-8b/final/bf16/
+        - -o=gs://llama3-8b-jetstream/pytorch/llama3-8b/final/bf16/
         - -n=llama-3
         - -q=False
         - -h=True
