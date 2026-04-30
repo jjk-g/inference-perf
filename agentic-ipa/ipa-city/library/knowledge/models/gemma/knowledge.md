@@ -7,6 +7,12 @@ The `gemma4-vllm` configuration is used for deploying the Gemma 4 model using th
 - **Model ID**: `google/gemma-2b` (Note: Currently points to gemma-2b in manifest)
 - **Deployment Name**: `gemma4-vllm-vllm-deployment`
 - **Service Name**: `gemma4-vllm-vllm-service`
+- **Status**: Benchmark Completed
+- **Metrics**:
+  - Request Latency (Mean): 0.845s
+  - Time to First Token (Mean): 0.116s
+  - Throughput (Total Tokens/sec): 6294.37
+  - Requests/sec: 9.36
 - **Resources**: 1 NVIDIA GPU (RTX 6000 recommended)
 
 ## gemma-2b-vllm
