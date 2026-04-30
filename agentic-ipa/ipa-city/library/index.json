@@ -19,6 +19,7 @@
       "connectivity": "library/knowledge/dolt/connectivity/knowledge.md"
     },
     "benchmarks": {
+      "gemma-7b-it": "library/knowledge/benchmarks/gemma-7b-it/summary_lifecycle_metrics.json",
       "gemma4-vllm": "library/knowledge/benchmarks/gemma4-vllm/summary_lifecycle_metrics.json",
       "gemma-2b": "library/knowledge/benchmarks/gemma-2b/summary_lifecycle_metrics.json",
       "llama3-8b": "library/knowledge/benchmarks/llama3-8b/summary_lifecycle_metrics.json",

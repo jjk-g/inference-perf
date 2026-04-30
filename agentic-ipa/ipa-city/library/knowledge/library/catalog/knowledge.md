@@ -20,6 +20,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Knowledge Domains
 
+- **benchmarks/gemma-7b-it**: Performance results and metrics for the gemma-7b-it model deployment.
 - **benchmarks/gemma-2b**: Performance results and metrics for the gemma-2b model deployment.
 - **benchmarks/gemma4-vllm**: Performance results and metrics for the gemma4-vllm model deployment.
 - **benchmarks/llama3-8b**: Performance results and metrics for the llama3-8b model deployment.
