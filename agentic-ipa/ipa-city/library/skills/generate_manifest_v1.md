@@ -28,3 +28,11 @@ This skill describes how to generate Kubernetes deployment manifests for model s
 
 3. **Verify the output**:
    Ensure the generated file is not empty and contains valid Kubernetes resources (Deployment, Service, etc.).
+
+## Troubleshooting: Missing Overlay
+If a model overlay does not exist for your target server type (vLLM or JetStream):
+1. **Find a similar model**: Identify an existing overlay for the same server type (e.g., `gemma-2b` for `vllm`).
+2. **Copy and adapt**: Copy the entire directory structure of the similar model to a new directory named after your target model.
+3. **Update patches**: Modify the `.patch.yaml` files in the new directory to point to the correct model name and deployment identifiers.
+4. **Update kustomization**: Ensure the `kustomization.yaml` correctly references the base and components.
+

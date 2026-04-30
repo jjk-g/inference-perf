@@ -16,3 +16,10 @@ The `gemma-2b-vllm` configuration is used for deploying the Gemma 2b model using
 - **Model ID**: `google/gemma-2b`
 - **Deployment Name**: `gemma-2b-vllm-deployment`
 - **Resources**: 1 NVIDIA GPU (RTX 6000 recommended)
+
+## gemma-7b-it
+The `gemma-7b-it` configuration is used for deploying the Gemma 7b Instruction Tuned model.
+
+- **vLLM Overlay**: `packs/model-serving/overlays/kustomize/vllm/gemma-7b-it`
+- **JetStream Overlay**: `packs/model-serving/overlays/kustomize/jetstream/gemma-7b-it`
+- **Resources**: 1 NVIDIA GPU (RTX 6000) or TPU v5e 2x4 (JetStream)
