@@ -17,6 +17,8 @@ This skill describes how to generate Kubernetes deployment manifests for model s
    ```
 
 2. **Generate the manifest**:
+   **Note**: Even if a manifest file for the target model already exists, you should still regenerate it to ensure it is up-to-date with the latest overlay configurations.
+
    Run `kustomize build` and redirect the output to a YAML file in the `library/knowledge/manifests/` directory. Adjust the relative path as needed (e.g., `../../../../../` if you are in a `gke` subdirectory).
 
    

@@ -1,4 +1,4 @@
-# Gemma-2b
+# Gemma4-vLLM
 
 ## Configuration
 | Kind | Model Server | Model | Provider | Accelerator |

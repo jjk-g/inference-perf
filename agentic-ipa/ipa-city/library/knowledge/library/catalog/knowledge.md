@@ -51,3 +51,4 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **2026-04-30**: Library updated with JetStream GPU manifest and manifest cleanup instructions added to `apply_manifest` skill.
 - **2026-04-30**: Archived new vLLM benchmark results for Llama 3 8B and Gemma 7B-it, replacing older runs. All library indices are consistent.
 - **2026-04-30**: Updated `generate_manifest` and `archive_results` skills with explicit permission for workers to write to the library when following these skills.
+- **2026-04-30**: (Shift 16:00Z) All pending skill checkout and research requests fulfilled. `generate_manifest` skill updated with feedback regarding manifest regeneration. Root directory cleaned and stray benchmark results archived.
