@@ -14,7 +14,7 @@ data:
     max: 1024
     mean: 512.0
     std_dev: 200.0
-    total_count: 21
+    total_count: 301
     type: uniform
     variance: null
     skew: 0.0
@@ -23,7 +23,7 @@ data:
     max: 256
     mean: 128.0
     std_dev: 200.0
-    total_count: 21
+    total_count: 301
     type: uniform
     variance: null
     skew: 0.0
@@ -35,8 +35,8 @@ load:
   type: constant
   interval: 1.0
   stages:
-  - rate: 2.0
-    duration: 10
+  - rate: 5.0
+    duration: 60
     num_requests: null
     concurrency_level: null
   sweep: null
@@ -47,7 +47,7 @@ load:
   circuit_breakers: []
   request_timeout: null
   lora_traffic_split: null
-  base_seed: 1777534503914
+  base_seed: 1777537705892
 metrics: null
 report:
   request_lifecycle:
@@ -78,14 +78,14 @@ report:
   goodput: null
 storage:
   local_storage:
-    path: reports-20260430-073503
+    path: reports-20260430-082825
     report_file_prefix: null
   google_cloud_storage: null
   simple_storage_service: null
 server:
   type: vllm
   model_name: null
-  base_url: http://localhost:8003
+  base_url: http://localhost:8005
   ignore_eos: true
   api_key: null
   cert_path: null

@@ -21,6 +21,10 @@ pdm run -p ../inference-perf inference-perf \
   --data.input_distribution.max 1024 \
   --data.input_distribution.mean 512 \
   --data.input_distribution.type uniform \
+  --data.output_distribution.min 16 \
+  --data.output_distribution.max 256 \
+  --data.output_distribution.mean 128 \
+  --data.output_distribution.type uniform \
   --load.type constant \
   --load.stages '[{"rate": 10, "duration": 60}]' \
   --api.streaming true
