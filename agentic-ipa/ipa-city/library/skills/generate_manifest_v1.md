@@ -15,7 +15,7 @@ This skill describes how to generate Kubernetes deployment manifests for model s
    ```
 
 2. **Generate the manifest**:
-   Run `kustomize build` and redirect the output to a YAML file in the `packs/model-serving` directory. Adjust the relative path as needed (e.g., `../../../../../` if you are in a `gke` subdirectory).
+   Run `kustomize build` and redirect the output to a YAML file in the `library/knowledge/manifests/` directory. Adjust the relative path as needed (e.g., `../../../../../` if you are in a `gke` subdirectory).
 
    
    Naming convention: `generated-<server>-<model>.yaml` (e.g., `generated-vllm-llama3-70b.yaml`).
@@ -23,7 +23,7 @@ This skill describes how to generate Kubernetes deployment manifests for model s
    Example:
    ```bash
    # From packs/model-serving/overlays/kustomize/vllm/llama3-70b
-   kustomize build . > ../../../../../generated-vllm-llama3-70b.yaml
+   kustomize build . > ../../../../../library/knowledge/manifests/generated-vllm-llama3-70b.yaml
    ```
 
 3. **Verify the output**:
