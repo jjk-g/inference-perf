@@ -17,8 +17,9 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
-- **aipa/model-benchmark-pipeline**: Overseer formula for coordinating the full lifecycle of model performance evaluation.
+- **aipa/run-survey**: Overseer formula for coordinating the full lifecycle of model performance evaluation.
 - **aipa/formulas**: Description of the core formulas used in the AIPA workflow.
 - **models/gemma**: Information about the Gemma model family and configurations.
-- **models/llama3-8b**: Deployment details and configuration for the Llama3-8b model.
+- **models/llama3**: Details and configuration for Llama3 models (8b, 70b).
+- **work/available**: Summary of current backlog and work strategies for worker agents.
 - **library/catalog**: (This file) The index of all available skills and knowledge.

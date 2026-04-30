@@ -2,6 +2,13 @@
 
 This document describes the core formulas used in the Agentic Inference Profile Automation (AIPA) workflow.
 
+## generate-manifest
+Generates a Kubernetes deployment manifest for a specific model configuration using Kustomize overlays.
+
+- **Action**: Runs `kustomize build <overlay-path>`.
+- **Worker**: Generation Worker.
+- **Labels**: `formula=generate-manifest`.
+
 ## apply-manifest
 Deploys a model server to the cluster using a generated manifest.
 
@@ -29,3 +36,10 @@ Archives and indexes the results of a benchmark run.
 - **Action**: Moves results to the storage bucket and updates the index.
 - **Worker**: Archiving Worker.
 - **Labels**: `formula=archive-results`.
+
+## run-survey
+Full pipeline to generate, deploy, benchmark, and analyze a model server.
+
+- **Action**: Overseer formula that delegates the above steps.
+- **Worker**: Overseer (e.g., Mayor).
+- **Labels**: `formula=run-survey`.
