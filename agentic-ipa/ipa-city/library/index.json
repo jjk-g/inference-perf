@@ -20,12 +20,14 @@
     },
     "benchmarks": {
       "gemma4-vllm": "library/knowledge/benchmarks/gemma4-vllm/summary_lifecycle_metrics.json",
+      "gemma-2b": "library/knowledge/benchmarks/gemma-2b/summary_lifecycle_metrics.json",
       "llama3-8b": "library/knowledge/benchmarks/llama3-8b/summary_lifecycle_metrics.json",
       "llama3-70b": "library/knowledge/benchmarks/llama3-70b/summary_lifecycle_metrics.json"
     },
     "aipa": {
       "workflow": "library/knowledge/aipa/workflow/knowledge.md",
       "manifest-generation": "library/knowledge/aipa/manifest-generation/knowledge.md",
+      "manifests": "library/knowledge/aipa/manifests.md",
       "run-survey": "library/knowledge/aipa/run-survey/knowledge.md",
       "formulas": "library/knowledge/aipa/formulas/knowledge.md"    },
     "models": {

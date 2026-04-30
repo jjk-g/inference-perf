@@ -1,45 +1,43 @@
 # Available Work for Workers
 
-This document summarizes the current status of work available for Worker agents in Gas City as of 2026-04-30.
+This document summarizes the current status of work available for Worker agents in Gas City as of 2026-04-30 07:40Z.
 
 ## Current Backlog Status
 
 As of today, the ready work items include:
-- **ic-my5.1**: Scan for stale and test databases (P2). Infrastructure task to identify orphaned databases.
-- **ic-e68.2**: Quarantine phantom databases (P2). Infrastructure task to remove corrupted database directories.
-- **ic-0pb.2**: Sync backups to offsite storage (P2).
+- **NEW**: **Gemma-2B Pipeline**. The manifest `generated-vllm-gemma-2b.yaml` is available in the root. Deployment is currently in progress. This is the top priority.
+- **Verification**: Check library consistency and audit skills. Ongoing.
 
 ### Completed Tasks
-- **ic-xk9.1**: Probe Dolt server connectivity (P2). Completed by worker-adhoc-5580185628. Server reachable on port 30085.
-- **ic-e68.1**: Scan for phantom databases (P2). Completed.
+- **ic-xk9.1**: Probe Dolt server connectivity (P2). Completed.
+- **ic-e68.1/2**: Scan for and quarantine phantom databases (P2). Completed.
+- **ic-my5.1**: Scan for stale and test databases (P2). Completed.
+- **ic-0pb.1/2**: Sync databases to backup remotes and offsite storage (P2). Completed.
+- **llama3-8b deployment & benchmark**: Completed and archived by worker-1 (ic-i4me).
+- **llama3-70b deployment & benchmark**: Completed and archived by worker-ic-p5g.
+- **gemma4-vllm deployment & benchmark**: Completed and archived.
 
 ## AIPA Pipeline Progress
 
-Two `run-survey` pipelines are currently active:
-1.  **ic-mol-faz4**: Manifest generation (ic-mol-m8id) is complete. Next step: Delegate Deployment (ic-mol-pq33).
-2.  **ic-mol-hg8v**: Manifest generation (ic-mol-omp4) is complete. Next step: Delegate Deployment (ic-mol-a2kv).
+Status of active pipelines:
+1.  **ic-mol-faz4 (llama3-70b)**: Benchmarking and archiving are complete. Waiting for the Mayor to close the molecule.
+2.  **ic-mol-hg8v (gemma4-vllm)**: All steps complete. Waiting for the Mayor to close the molecule.
+3.  **Mayor Status**: The Mayor (ic-dxp) has returned from quarantine and is currently active.
 
 ## Formulas and Structured Workflows
 
-Workers should look for opportunities to run formulas if no individual tasks are available. Formulas represent repeatable units of work in the AIPA (Agentic Inference Profile Automation) lifecycle.
-
-### Available AIPA Formulas
-1.  **generate-manifest**: Generate K8s deployment manifests for model servers.
-2.  **apply-manifest**: Apply a generated K8s manifest to the cluster.
-3.  **wait-healthy**: Wait for a deployment to become healthy.
-4.  **run-benchmark**: Run inference performance tests.
-5.  **archive-results**: Archive and index benchmark results.
-6.  **model-benchmark-pipeline**: A meta-formula that orchestrates the above steps.
+Workers should look for opportunities to run formulas for **gemma-2b**.
 
 ### How to Run a Formula
-If you have a specific model configuration to test (e.g., from a request or a backlog item), you can "pour" a formula:
+If you have a specific model configuration to test, you can "pour" a formula:
 ```bash
 bd mol pour model-benchmark-pipeline
 ```
+Or run individual steps using `bd mol pour run-benchmark`, etc.
 
 ## Strategy for Workers with No Work
 If `bd ready` is empty or only contains session beads:
-1.  **Consult the Mayor**: Send a message to the `mayor` asking for new objectives or task generation.
-2.  **Verify Manifests**: Check for existing `.yaml` manifests in the root directory and verify if they have been successfully deployed and benchmarked by checking `results.json`.
-3.  **Check for Blocked Work**: Run `bd blocked` to see if there are tasks waiting on dependencies that you can help resolve.
-4.  **Audit the Library**: Assist the Librarian by verifying that skills and knowledge files are accurate and up-to-date.
+1.  **Consult the Mayor**: Send a message to the `mayor` asking for new objectives.
+2.  **Verify Library Consistency**: Check `library/index.json` against `library/knowledge/benchmarks/` to ensure all results are properly indexed.
+3.  **Check for Blocked Work**: Run `bd blocked` to see if there are tasks waiting on dependencies.
+4.  **Audit Skills**: Verify that skills in `library/skills/` reflect the latest best practices (e.g., using `pdm run -p`).

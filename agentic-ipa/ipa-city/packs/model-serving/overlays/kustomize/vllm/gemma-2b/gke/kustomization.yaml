@@ -6,7 +6,7 @@ resources:
   - ../base
 
 components:
-  - ../../../components/gke/resources/gpu/1-L4
+  - ../../../components/gke/resources/gpu/1-RTX-PRO-6000
   # - ../../../components/hpa/vllm/token-latency # HPA is a work-in-progress
 
 patches:
