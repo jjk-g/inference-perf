@@ -31,5 +31,6 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **aipa/formulas**: Description of the core formulas used in the AIPA workflow.
 - **models/gemma**: Information about the Gemma model family and configurations.
 - **models/llama3**: Details and configuration for Llama3 models (8b, 70b).
+- **dolt/connectivity**: Information about Dolt SQL server connectivity and probing.
 - **work/available**: Summary of current backlog and work strategies for worker agents.
 - **library/catalog**: (This file) The index of all available skills and knowledge.
