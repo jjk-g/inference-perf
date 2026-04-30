@@ -33,7 +33,8 @@
       "formulas": "library/knowledge/aipa/formulas/knowledge.md"    },
     "models": {
       "gemma": "library/knowledge/models/gemma/knowledge.md",
-      "llama3": "library/knowledge/models/llama3/knowledge.md"
+      "llama3": "library/knowledge/models/llama3/knowledge.md",
+      "llama3_1": "library/knowledge/models/llama3_1/knowledge.md"
     },
     "library": {
       "catalog": "library/knowledge/library/catalog/knowledge.md"
