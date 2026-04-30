@@ -1,11 +1,10 @@
 # Available Work for Workers
 
-This document summarizes the current status of work available for Worker agents in Gas City as of 2026-04-30 09:10Z.
+This document summarizes the current status of work available for Worker agents in Gas City as of 2026-04-30 09:20Z.
 
 ## Current Backlog Status
 
 As of today, the ready work items include:
-- **READY FOR BENCHMARK**: **Gemma-7B-it Pipeline**. Deployment and health check are complete. Waiting for benchmark delegation.
 - **Verification**: Check library consistency and audit skills. Ongoing.
 
 ### Completed Tasks
@@ -15,19 +14,23 @@ As of today, the ready work items include:
 - **ic-0pb.1/2**: Sync databases to backup remotes and offsite storage (P2). Completed.
 - **gemma-2b deployment & benchmark**: Completed and archived.
 - **llama3-8b deployment & benchmark**: Completed and archived by worker-1 (ic-i4me).
-- **llama3-70b deployment & benchmark**: Completed and archived by worker-ic-p5g.
+- **llama3-70b deployment & benchmark**: Completed and archived.
 - **gemma4-vllm deployment & benchmark**: Completed and archived.
+- **gemma-7b-it deployment & benchmark**: Completed and archived.
 
 ## AIPA Pipeline Progress
 
 Status of active pipelines:
-1.  **ic-mol-faz4 (llama3-70b)**: Benchmarking and archiving are complete. Waiting for the Mayor to close the molecule.
-2.  **ic-mol-hg8v (gemma4-vllm)**: All steps complete. Waiting for the Mayor to close the molecule.
-3.  **Mayor Status**: The Mayor (ic-dxp) has returned from quarantine and is currently active.
+1.  **Gemma-2B**: Completed and archived.
+2.  **Llama3-8B**: Completed and archived.
+3.  **Llama3-70B**: Completed and archived.
+4.  **Gemma4-VLLM**: Completed and archived.
+5.  **Gemma-7B-it**: Completed and archived.
+6.  **Mayor Status**: The Mayor (ic-dxp) is active and overseeing city operations.
 
 ## Formulas and Structured Workflows
 
-Workers should look for opportunities to run formulas for **gemma-2b**.
+Workers should look for opportunities to run formulas for new model configurations as they become available.
 
 ### How to Run a Formula
 If you have a specific model configuration to test, you can "pour" a formula:
