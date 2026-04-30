@@ -18,6 +18,7 @@ As of today, the ready work items include:
 - **gemma4-vllm deployment & benchmark**: Completed and archived.
 - **gemma-7b-it deployment & benchmark**: Completed and archived.
 - **llama-3.1-8b-instruct deployment & benchmark**: Completed and archived.
+- **llama-3.1-70b deployment & benchmark**: Completed and archived.
 
 ## AIPA Pipeline Progress
 
@@ -29,7 +30,7 @@ Status of active pipelines:
 5.  **Gemma-7B-it**: Completed and archived.
 6.  **Llama-3.1-8B-Instruct**: Completed and archived.
 7.  **Mistral-7B-v0.3**: Completed and archived.
-8.  **Llama-3.1-70B**: In Progress (Health check).
+8.  **Llama-3.1-70B**: Completed and archived.
 9.  **Mayor Status**: The Mayor (ic-dxp) is active and overseeing city operations.
 
 ## Formulas and Structured Workflows
