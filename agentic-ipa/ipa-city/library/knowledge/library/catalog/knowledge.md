@@ -23,7 +23,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmarks/gemma-7b-it**: Performance results and metrics for the gemma-7b-it model deployment.
 - **benchmarks/gemma-2b**: Performance results and metrics for the gemma-2b model deployment.
 - **benchmarks/gemma4-vllm**: Performance results for gemma4-vllm. Achieved 6294.37 total tokens/sec with a 95.2% success rate (571/600 requests).
-- **benchmarks/llama3-8b**: Performance results and metrics for the llama3-8b model deployment.
+- **benchmarks/llama3-8b**: Performance results and metrics for the llama3-8b model deployment (TPU).
+- **benchmarks/llama3-8b-gpu**: (Pending) Deployment configuration for JetStream on GPUs.
 - **benchmarks/llama3-70b**: Performance results and metrics for the llama3-70b model deployment.
 - **benchmarks/llama-3.1-70b**: Performance results for Llama-3.1-70B. Achieved 1314.44 output tokens/sec with 0 failures (600/600 requests).
 - **benchmarks/llama-3-1-8b-instruct**: Performance results and metrics for the Llama 3.1 8B Instruct model.
@@ -45,3 +46,4 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 - **2026-04-30**: Library consistency verified. All benchmarks (Gemma, Llama, Mistral) are indexed.
 - **2026-04-30**: Skill audit complete. `benchmark_vllm` and `inference-perf` updated with port best practices (avoiding 8001).
+- **2026-04-30**: Library updated with JetStream GPU manifest and manifest cleanup instructions added to `apply_manifest` skill.

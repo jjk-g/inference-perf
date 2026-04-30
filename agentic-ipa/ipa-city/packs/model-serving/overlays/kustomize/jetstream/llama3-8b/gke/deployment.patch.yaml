@@ -23,5 +23,5 @@ spec:
           driver: gcsfuse.csi.storage.gke.io
           readOnly: true
           volumeAttributes:
-            bucketName: $BUCKET_NAME
+            bucketName: llama3-8b-jetstream
             mountOptions: "implicit-dirs"

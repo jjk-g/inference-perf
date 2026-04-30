@@ -6,12 +6,11 @@ spec:
   template:
     spec:
       nodeSelector:
-        cloud.google.com/gke-tpu-topology: 2x4
-        cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+        cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
       containers:
       - name: inference-checkpoint
         resources:
           requests:
-            google.com/tpu: 8
+            nvidia.com/gpu: 1
           limits:
-            google.com/tpu: 8
+            nvidia.com/gpu: 1

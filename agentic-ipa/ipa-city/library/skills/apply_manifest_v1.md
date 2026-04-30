@@ -18,3 +18,15 @@ This skill describes how to deploy a model server using a generated Kubernetes m
    ```
 3. **Verify Submission**:
    The command should output `service/<name> created` and `deployment/<name> created`.
+
+## Cleanup
+To remove a deployed model server and free up resources, use the `kubectl delete` command with the same manifest file.
+
+```bash
+kubectl delete -f <manifest-path>
+```
+Example:
+```bash
+kubectl delete -f generated-llama3-8b-manifest.yaml
+```
+This will remove the deployment, service, and any other resources defined in the manifest.

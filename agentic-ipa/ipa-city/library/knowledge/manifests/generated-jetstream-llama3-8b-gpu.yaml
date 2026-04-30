@@ -1,0 +1,134 @@
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: llama3-8b-jetstream-inference-server
+  name: llama3-8b-jetstream-service
+spec:
+  ports:
+  - name: jetstream-http
+    port: 8000
+    protocol: TCP
+    targetPort: 8000
+  - name: jetstream-grpc
+    port: 9000
+    protocol: TCP
+    targetPort: 9000
+  selector:
+    app: llama3-8b-jetstream-inference-server
+    deployment: llama3-8b-jetstream-deployment
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: llama3-8b-jetstream-inference-server
+  name: llama3-8b-jetstream-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: llama3-8b-jetstream-inference-server
+      deployment: llama3-8b-jetstream-deployment
+  template:
+    metadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
+      labels:
+        ai.gke.io/inference-server: jetstream
+        ai.gke.io/model: LLaMA3_8B
+        app: llama3-8b-jetstream-inference-server
+        deployment: llama3-8b-jetstream-deployment
+        examples.ai.gke.io/source: blueprints
+    spec:
+      containers:
+      - args:
+        - --size=8b
+        - --model_name=llama-3
+        - --batch_size=80
+        - --max_cache_length=2048
+        - --quantize_weights=False
+        - --quantize_kv_cache=False
+        - --tokenizer_path=/models/pytorch/llama3-8b/final/bf16/tokenizer.model
+        - --checkpoint_path=/models/pytorch/llama3-8b/final/bf16/model.safetensors
+        - --prometheus_port=9100
+        env:
+        - name: TENSOR_PARALLEL_SIZE
+          value: "1"
+        image: us-docker.pkg.dev/cloud-tpu-images/inference/jetstream-pytorch-server:v0.2.3
+        name: inference-server
+        ports:
+        - containerPort: 9100
+          name: metrics
+        - containerPort: 9000
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+          requests:
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - mountPath: /models
+          name: gcs-fuse-checkpoint
+      - image: us-docker.pkg.dev/cloud-tpu-images/inference/jetstream-http:v0.2.2
+        name: jetstream-http
+        ports:
+        - containerPort: 8000
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+      volumes:
+      - csi:
+          driver: gcsfuse.csi.storage.gke.io
+          readOnly: true
+          volumeAttributes:
+            bucketName: llama3-8b-jetstream
+            mountOptions: implicit-dirs
+        name: gcs-fuse-checkpoint
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    app: llama3-8b-jetstream-data-loader
+    prerequisite: model-load
+  name: llama3-8b-jetstream-data-loader
+spec:
+  template:
+    metadata:
+      labels:
+        app: llama3-8b-jetstream-data-loader
+    spec:
+      containers:
+      - args:
+        - -s=jetstream-pytorch
+        - -m=meta-llama/Meta-Llama-3-8B
+        - -o=gs://llama3-8b-jetstream/pytorch/llama3-8b/final/bf16/
+        - -n=llama-3
+        - -q=False
+        - -h=True
+        image: us-docker.pkg.dev/cloud-tpu-images/inference/inference-checkpoint:v0.2.3
+        name: inference-checkpoint
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+          requests:
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - mountPath: /huggingface/
+          name: huggingface-credentials
+          readOnly: true
+        - mountPath: /kaggle/
+          name: kaggle-credentials
+          readOnly: true
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+      restartPolicy: Never
+      volumes:
+      - name: huggingface-credentials
+        secret:
+          defaultMode: 256
+          secretName: huggingface-secret
+      - name: kaggle-credentials
+        secret:
+          defaultMode: 256
+          secretName: kaggle-secret
+  ttlSecondsAfterFinished: 30
