@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: gemma-7b-it-vllm-inference-server
+  name: gemma-7b-it-vllm-deployment
+spec:
+  selector:
+    matchLabels:
+      app: gemma-7b-it-vllm-inference-server
+      deployment: gemma-7b-it-vllm-deployment
+  template:
+    metadata:
+      labels:
+        app: gemma-7b-it-vllm-inference-server
+        deployment: gemma-7b-it-vllm-deployment
+    spec:
+      containers:
+      - name: inference-server
+        env:
+          - name: MODEL_ID
+            value: google/gemma-7b-it
