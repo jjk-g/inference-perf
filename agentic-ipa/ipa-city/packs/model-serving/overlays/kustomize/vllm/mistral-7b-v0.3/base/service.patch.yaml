@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mistral-7b-v0-3-vllm-service
+  labels:
+    app: mistral-7b-v0-3-vllm-inference-server
+spec:
+  selector:
+    app: mistral-7b-v0-3-vllm-inference-server
+    deployment: mistral-7b-v0-3-vllm-deployment

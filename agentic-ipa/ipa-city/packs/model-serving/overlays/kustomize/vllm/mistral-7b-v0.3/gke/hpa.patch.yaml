@@ -1,0 +1,10 @@
+- op: add
+  path: /metadata/name
+  value: mistral-7b-v0-3-vllm-hpa
+- op: add
+  path: /metadata/labels
+  value:
+    app: mistral-7b-v0-3-vllm-inference-server
+- op: add
+  path: /spec/metrics/0/pods/target/averageValue
+  value: 50

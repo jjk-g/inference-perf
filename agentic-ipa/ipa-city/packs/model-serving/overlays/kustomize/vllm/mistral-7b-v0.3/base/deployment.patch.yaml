@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: mistral-7b-v0-3-vllm-inference-server
+  name: mistral-7b-v0-3-vllm-deployment
+spec:
+  selector:
+    matchLabels:
+      app: mistral-7b-v0-3-vllm-inference-server
+      deployment: mistral-7b-v0-3-vllm-deployment
+  template:
+    metadata:
+      labels:
+        app: mistral-7b-v0-3-vllm-inference-server
+        deployment: mistral-7b-v0-3-vllm-deployment
+    spec:
+      containers:
+      - name: inference-server
+        env:
+          - name: MODEL_ID
+            value: mistralai/Mistral-7B-v0.3
