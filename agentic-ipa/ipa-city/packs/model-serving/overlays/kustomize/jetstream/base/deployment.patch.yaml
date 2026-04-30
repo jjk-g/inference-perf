@@ -19,6 +19,7 @@ spec:
         image: us-docker.pkg.dev/cloud-tpu-images/inference/maxengine-server:v0.2.2
         ports:
         - containerPort: 9000
+        env: []
       - name: jetstream-http
         image: us-docker.pkg.dev/cloud-tpu-images/inference/jetstream-http:v0.2.2
         ports:

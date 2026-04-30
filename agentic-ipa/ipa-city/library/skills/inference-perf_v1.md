@@ -10,14 +10,14 @@ This skill describes how to run inference performance tests against a model serv
 ## Process
 Run the following command from the `ipa-city` root, adjusting the `--server.base_url` and load parameters as needed.
 
-**Note on Connectivity**: If the model server is not directly reachable, use `kubectl port-forward` to map the service port to `localhost:8001` (or another local port). 
+**Note on Connectivity**: If the model server is not directly reachable, use `kubectl port-forward` to map the service port to a local port. **Avoid using port 8001** as it is frequently in use; instead, use a unique port like `8002` or `8003`. 
 
 **Tip: Finding the Service Name**: You can find the correct service name and port in the model's manifest (e.g., `library/knowledge/manifests/manifest-<model>.yaml`). Look for the `Service` resource definition.
 
 ```bash
 pdm run -p ../inference-perf inference-perf \
   --server.type vllm \
-  --server.base_url http://localhost:8001 \
+  --server.base_url http://localhost:8002 \
   --data.type random \
   --data.input_distribution.min 128 \
   --data.input_distribution.max 1024 \
@@ -41,7 +41,7 @@ The tool generates a report file. Look for a `reports/` directory or a new JSON 
 ```bash
 pdm run -p ../inference-perf inference-perf \
   --server.type vllm \
-  --server.base_url http://localhost:8001 \
+  --server.base_url http://localhost:8002 \
   --data.type random \
   --data.input_distribution.min 128 \
   --data.input_distribution.max 1024 \
@@ -60,7 +60,7 @@ pdm run -p ../inference-perf inference-perf \
 ```bash
 pdm run -p ../inference-perf inference-perf \
   --server.type vllm \
-  --server.base_url http://localhost:8001 \
+  --server.base_url http://localhost:8002 \
   --data.type random \
   --data.input_distribution.min 128 \
   --data.input_distribution.max 1024 \

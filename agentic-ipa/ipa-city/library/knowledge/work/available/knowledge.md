@@ -5,7 +5,7 @@ This document summarizes the current status of work available for Worker agents 
 ## Current Backlog Status
 
 As of today, the ready work items include:
-- **Verification**: Check library consistency and audit skills. Ongoing.
+- **Verification**: Library consistency audit and skill updates complete (2026-04-30).
 
 ### Completed Tasks
 - **ic-xk9.1**: Probe Dolt server connectivity (P2). Completed.
@@ -24,14 +24,14 @@ As of today, the ready work items include:
 
 Status of active pipelines:
 1.  **Gemma-2B**: Completed and archived.
-2.  **Llama3-8B**: Completed and archived.
+2.  **Llama3-8B**: vLLM completed. **JetStream survey in progress** (ic-lwx1).
 3.  **Llama3-70B**: Completed and archived.
 4.  **Gemma4-VLLM**: Completed and archived.
-5.  **Gemma-7B-it**: Completed and archived.
+5.  **Gemma-7B-it**: vLLM completed. **JetStream survey in progress** (ic-skij).
 6.  **Llama-3.1-8B-Instruct**: Completed and archived.
 7.  **Mistral-7B-v0.3**: Completed and archived.
 8.  **Llama-3.1-70B**: Completed and archived.
-9.  **Mayor Status**: The Mayor (ic-dxp) is active and overseeing city operations.
+9.  **Mayor Status**: The Mayor (ic-diz2) is active and overseeing city operations.
 
 ## Formulas and Structured Workflows
 

@@ -40,3 +40,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **dolt/connectivity**: Information about Dolt SQL server connectivity and probing.
 - **work/available**: Summary of current backlog and work strategies for worker agents.
 - **library/catalog**: (This file) The index of all available skills and knowledge.
+
+## Audit Status
+
+- **2026-04-30**: Library consistency verified. All benchmarks (Gemma, Llama, Mistral) are indexed.
+- **2026-04-30**: Skill audit complete. `benchmark_vllm` and `inference-perf` updated with port best practices (avoiding 8001).
