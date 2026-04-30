@@ -20,7 +20,8 @@
     },
     "benchmarks": {
       "gemma4-vllm": "library/knowledge/benchmarks/gemma4-vllm/summary_lifecycle_metrics.json",
-      "llama3-8b": "library/knowledge/benchmarks/llama3-8b/summary_lifecycle_metrics.json"
+      "llama3-8b": "library/knowledge/benchmarks/llama3-8b/summary_lifecycle_metrics.json",
+      "llama3-70b": "library/knowledge/benchmarks/llama3-70b/summary_lifecycle_metrics.json"
     },
     "aipa": {
       "workflow": "library/knowledge/aipa/workflow/knowledge.md",

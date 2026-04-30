@@ -22,6 +22,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 - **benchmarks/gemma4-vllm**: Performance results and metrics for the gemma4-vllm model deployment.
 - **benchmarks/llama3-8b**: Performance results and metrics for the llama3-8b model deployment.
+- **benchmarks/llama3-70b**: Performance results and metrics for the llama3-70b model deployment.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
 - **aipa/run-survey**: Overseer formula for coordinating the full lifecycle of model performance evaluation.
