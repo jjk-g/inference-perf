@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: gemma-7b-it-jetstream-inference-server
+  name: gemma-7b-it-jetstream-service
+spec:
+  ports:
+  - name: jetstream-http
+    port: 8000
+    protocol: TCP
+    targetPort: 8000
+  - name: jetstream-grpc
+    port: 9000
+    protocol: TCP
+    targetPort: 9000
+  selector:
+    app: gemma-7b-it-jetstream-inference-server
+    deployment: gemma-7b-it-jetstream-deployment
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: gemma-7b-it-jetstream-inference-server
+  name: gemma-7b-it-jetstream-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gemma-7b-it-jetstream-inference-server
+      deployment: gemma-7b-it-jetstream-deployment
+  template:
+    metadata:
+      labels:
+        ai.gke.io/inference-server: jetstream
+        ai.gke.io/model: gemma-7b-it
+        app: gemma-7b-it-jetstream-inference-server
+        deployment: gemma-7b-it-jetstream-deployment
+        examples.ai.gke.io/source: blueprints
+    spec:
+      containers:
+      - args:
+        - model_name=gemma-7b
+        - tokenizer_path=assets/tokenizer.gemma
+        - per_device_batch_size=4
+        - max_prefill_predict_length=1024
+        - max_target_length=2048
+        - async_checkpointing=false
+        - ici_fsdp_parallelism=1
+        - ici_autoregressive_parallelism=-1
+        - ici_tensor_parallelism=1
+        - scan_layers=false
+        - weight_dtype=bfloat16
+        - load_parameters_path=gs://llama3-8b-jetstream/final/unscanned/gemma_7b-it/0/checkpoints/0/items
+        - prometheus_port=9100
+        env:
+        - name: TENSOR_PARALLEL_SIZE
+          value: "1"
+        image: us-docker.pkg.dev/cloud-tpu-images/inference/maxengine-server:v0.2.2
+        name: inference-server
+        ports:
+        - containerPort: 9100
+          name: metrics
+        - containerPort: 9000
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+          requests:
+            nvidia.com/gpu: 1
+      - image: us-docker.pkg.dev/cloud-tpu-images/inference/jetstream-http:v0.2.2
+        name: jetstream-http
+        ports:
+        - containerPort: 8000
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    app: gemma-7b-it-jetstream-data-loader
+    prerequisite: model-load
+  name: gemma-7b-it-jetstream-data-loader
+spec:
+  template:
+    metadata:
+      labels:
+        app: gemma-7b-it-jetstream-data-loader
+    spec:
+      containers:
+      - args:
+        - -b=llama3-8b-jetstream
+        - -m=google/gemma/maxtext/7b-it/2
+        image: us-docker.pkg.dev/cloud-tpu-images/inference/inference-checkpoint:v0.2.2
+        name: inference-checkpoint
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+          requests:
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - mountPath: /kaggle/
+          name: kaggle-credentials
+          readOnly: true
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+      restartPolicy: Never
+      volumes:
+      - name: kaggle-credentials
+        secret:
+          defaultMode: 256
+          secretName: kaggle-secret
+  ttlSecondsAfterFinished: 30

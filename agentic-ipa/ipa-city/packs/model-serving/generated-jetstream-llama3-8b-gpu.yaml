@@ -126,7 +126,7 @@ spec:
       - name: huggingface-credentials
         secret:
           defaultMode: 256
-          secretName: huggingface-secret
+          secretName: hf-secret
       - name: kaggle-credentials
         secret:
           defaultMode: 256

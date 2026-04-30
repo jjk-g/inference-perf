@@ -3,10 +3,10 @@
 ## Configuration
 | Kind | Model Server | Model | Provider | Accelerator |
 | --- | --- | --- | --- | --- |
-| Deployment | JetStream | llama3-8b | GKE | TPU v5e 2x4 |
+| Deployment | JetStream | llama3-8b | GKE | nvidia-rtx-pro-6000 |
 
 ## Usage
-$BUCKET_NAME must be replaced in `../job.patch.yaml` and `deployment.patch.yaml`
+The bucket name is configured as `llama3-8b-jetstream` by default. If you need to use a different bucket, update `bucketName` in `deployment.patch.yaml` and the `-o` flag in `../base/job.patch.yaml`.
 
 The example can be deployed by issuing the commands:
 
