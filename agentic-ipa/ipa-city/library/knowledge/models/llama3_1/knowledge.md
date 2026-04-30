@@ -7,10 +7,10 @@
 - **Status**: Benchmark Complete
 - **Resources**: 1 NVIDIA GPU (RTX 6000 recommended)
 
-## Llama-3.1-70B (Proposed)
+## Llama-3.1-70B
 
 - **Model ID**: `meta-llama/Meta-Llama-3.1-70B-Instruct`
-- **vLLM Overlay**: `packs/model-serving/overlays/kustomize/vllm/llama-3.1-70b` (To be created)
-- **Status**: Proposed
+- **vLLM Overlay**: `packs/model-serving/overlays/kustomize/vllm/llama-3.1-70b`
+- **Status**: Ready for Deployment
 - **Resources**: 8 NVIDIA GPUs (RTX 6000 recommended)
 
