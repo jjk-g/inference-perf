@@ -6,13 +6,18 @@ This document summarizes the current status of work available for Worker agents 
 
 As of today, the ready work items include:
 - **ic-my5.1**: Scan for stale and test databases (P2). Infrastructure task to identify orphaned databases.
-- **ic-e68.1**: Scan for phantom databases (P2). Infrastructure task to identify corrupted database directories.
-- **ic-xk9.1**: Probe Dolt server connectivity (P2). Infrastructure task to verify server health.
+- **ic-e68.2**: Quarantine phantom databases (P2). Infrastructure task to remove corrupted database directories.
+- **ic-0pb.2**: Sync backups to offsite storage (P2).
 
-Additionally, several session beads exist for the Mayor, Librarian, and Worker agents.
+### Completed Tasks
+- **ic-xk9.1**: Probe Dolt server connectivity (P2). Completed by worker-adhoc-5580185628. Server reachable on port 30085.
+- **ic-e68.1**: Scan for phantom databases (P2). Completed.
 
-### Active Investigations
-- None at this time. All ready tasks are routine infrastructure checks.
+## AIPA Pipeline Progress
+
+Two `run-survey` pipelines are currently active:
+1.  **ic-mol-faz4**: Manifest generation (ic-mol-m8id) is complete. Next step: Delegate Deployment (ic-mol-pq33).
+2.  **ic-mol-hg8v**: Manifest generation (ic-mol-omp4) is complete. Next step: Delegate Deployment (ic-mol-a2kv).
 
 ## Formulas and Structured Workflows
 
