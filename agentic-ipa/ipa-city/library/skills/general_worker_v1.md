@@ -17,15 +17,18 @@ bd update <id> --claim  # Claim the issue atomically
 Perform the task as described in the issue. Follow any specific skills or knowledge relevant to the task.
 
 ### 3. Session Completion (MANDATORY)
-Before ending your session, you MUST push your changes and update the issue status.
+Before ending your session, you MUST complete all steps below. Work is NOT complete until `git push` succeeds.
 
-1. **File follow-up issues**: `bd create "Follow-up: <task>"` if more work is needed.
-2. **Run quality gates**: Ensure tests/linters pass if you modified code.
-3. **Close finished work**: `bd close <id>`
-4. **Push to Remote**:
+1. **File follow-up issues**: Create issues for anything that needs follow-up using `bd create`.
+2. **Run quality gates**: If code changed, run tests, linters, and builds.
+3. **Update issue status**: Close finished work (`bd close <id>`), update in-progress items.
+4. **PUSH TO REMOTE**:
    ```bash
    git pull --rebase
    bd dolt push
    git push
+   git status  # MUST show "up to date with origin"
    ```
-5. **Verify**: Run `git status` to ensure you are "up to date with origin".
+5. **Clean up**: Clear stashes, prune remote branches.
+6. **Verify**: All changes committed AND pushed.
+7. **Hand off**: Provide context for the next session.

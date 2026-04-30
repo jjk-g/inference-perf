@@ -5,8 +5,7 @@ This document summarizes the current status of work available for Worker agents 
 ## Current Backlog Status
 
 As of today, the ready work items include:
-- **IN PROGRESS**: **Gemma-7B-it Pipeline**. Deployment complete, currently waiting for health check.
-- **IN PROGRESS**: **Gemma-2B Pipeline**. The manifest `generated-vllm-gemma-2b.yaml` is available in the root. Deployment is currently in progress.
+- **READY FOR BENCHMARK**: **Gemma-7B-it Pipeline**. Deployment and health check are complete. Waiting for benchmark delegation.
 - **Verification**: Check library consistency and audit skills. Ongoing.
 
 ### Completed Tasks
@@ -14,6 +13,7 @@ As of today, the ready work items include:
 - **ic-e68.1/2**: Scan for and quarantine phantom databases (P2). Completed.
 - **ic-my5.1**: Scan for stale and test databases (P2). Completed.
 - **ic-0pb.1/2**: Sync databases to backup remotes and offsite storage (P2). Completed.
+- **gemma-2b deployment & benchmark**: Completed and archived.
 - **llama3-8b deployment & benchmark**: Completed and archived by worker-1 (ic-i4me).
 - **llama3-70b deployment & benchmark**: Completed and archived by worker-ic-p5g.
 - **gemma4-vllm deployment & benchmark**: Completed and archived.
