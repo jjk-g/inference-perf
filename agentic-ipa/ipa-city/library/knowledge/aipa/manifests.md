@@ -6,8 +6,8 @@ This document tracks the available Kubernetes deployment manifests in the Gas Ci
 
 | Model | Manifest File | Type | Status |
 |-------|---------------|------|--------|
-| Gemma 4 | `library/knowledge/manifests/manifest-gemma4-vllm.yaml` | vLLM | Benchmark Complete |
-| Gemma 4 (GPU) | `library/knowledge/manifests/manifest-gemma4-vllm-gpu.yaml` | vLLM | Ready |
+| Gemma 4 | `library/knowledge/manifests/generated-vllm-gemma4.yaml` | vLLM | Benchmark Complete |
+| Gemma 4 (GPU) | `library/knowledge/manifests/generated-vllm-gemma4-gpu.yaml` | vLLM | Ready |
 | Llama 3 8B | `library/knowledge/manifests/generated-vllm-llama3-8b.yaml` | vLLM | Benchmark Complete |
 | Llama 3 8B (JetStream) | `library/knowledge/manifests/generated-jetstream-llama3-8b.yaml` | JetStream | Ready |
 | Llama 3 70B | `library/knowledge/manifests/generated-vllm-llama3-70b.yaml` | vLLM | Updated |

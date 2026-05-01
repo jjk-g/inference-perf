@@ -3,7 +3,7 @@
 ## gemma4-vllm
 The `gemma4-vllm` configuration is used for deploying the Gemma 4 model using the vLLM serving engine.
 
-- **Manifest**: `manifest-gemma4-vllm.yaml`
+- **Manifest**: `generated-vllm-gemma4.yaml`
 - **Model ID**: `google/gemma-2b` (Note: Currently points to gemma-2b in manifest)
 - **Deployment Name**: `gemma4-vllm-vllm-deployment`
 - **Service Name**: `gemma4-vllm-vllm-service`

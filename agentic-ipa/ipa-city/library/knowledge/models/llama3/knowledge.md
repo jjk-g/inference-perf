@@ -11,7 +11,7 @@
 ## Llama3-70b
 
 - **Model ID**: `meta-llama/Meta-Llama-3-70B`
-- **Manifest**: `manifest-llama3-70b.yaml`
+- **Manifest**: `generated-vllm-llama3-70b.yaml`
 - **Deployment Name**: `llama3-70b-vllm-deployment`
 - **Service Name**: `llama3-70b-vllm-service`
 - **Resources**: 8 NVIDIA GPUs (RTX 6000 recommended)
