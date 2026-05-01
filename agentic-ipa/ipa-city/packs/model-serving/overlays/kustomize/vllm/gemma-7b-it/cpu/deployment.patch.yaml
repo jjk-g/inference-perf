@@ -15,6 +15,7 @@ spec:
         args:
         - --model=$(MODEL_ID)
         - --device=cpu
+        - --enforce-eager
         env:
         - name: VLLM_TARGET_DEVICE
           value: cpu

@@ -38,6 +38,7 @@ spec:
       - args:
         - --model=$(MODEL_ID)
         - --device=cpu
+        - --enforce-eager
         command:
         - python3
         - -m
