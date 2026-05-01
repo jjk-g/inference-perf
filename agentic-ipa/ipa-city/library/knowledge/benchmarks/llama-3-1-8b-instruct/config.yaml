@@ -47,7 +47,7 @@ load:
   circuit_breakers: []
   request_timeout: null
   lora_traffic_split: null
-  base_seed: 1777541705611
+  base_seed: 1777598840260
 metrics: null
 report:
   request_lifecycle:
@@ -78,17 +78,20 @@ report:
   goodput: null
 storage:
   local_storage:
-    path: reports-20260430-093505
+    path: ./results
     report_file_prefix: null
   google_cloud_storage: null
   simple_storage_service: null
 server:
   type: vllm
-  model_name: null
-  base_url: http://localhost:8001
+  model_name: meta-llama/Meta-Llama-3.1-8B-Instruct
+  base_url: http://localhost:8088
   ignore_eos: true
   api_key: null
   cert_path: null
   key_path: null
-tokenizer: null
+tokenizer:
+  pretrained_model_name_or_path: meta-llama/Meta-Llama-3.1-8B-Instruct
+  trust_remote_code: null
+  token: null
 circuit_breakers: null

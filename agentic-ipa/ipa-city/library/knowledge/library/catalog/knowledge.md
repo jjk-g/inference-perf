@@ -44,8 +44,9 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Successfully resolved llama-3.1-8b-instruct survey failure. Identified and increased insufficient 32Gi memory limit to 64Gi, relaxed readiness probes, and corrected benchmark base_url. Re-benchmark achieved a new record of 2035.01 output tokens/sec (up from 1135.81 baseline).
+- **2026-05-01**: Archived failed benchmark results for Llama-3.1-8B-Instruct (100% failure rate) in `failed-2026-05-01/` for post-mortem analysis. Updated main index with successful re-run results.
 - **2026-05-01**: Standardized model knowledge files (`gemma`, `llama3`, `llama3_1`, `mistral`) with latest performance metrics (latency, TTFT, throughput, success rate) and linked to benchmark summaries. Cleaned up stray `benchmark_config.yaml` from root. Library consistency audit passed.
-- **2026-05-01**: Archived failed benchmark results for Llama-3.1-8B-Instruct (100% failure rate). Results stored in `library/knowledge/benchmarks/llama-3-1-8b-instruct/failed-2026-05-01/`. Worker notified of `inference-perf` CLI corrections. Analysis indicates pod termination during startup.
 
 - **2026-05-01**: Performed library consistency audit. Verified that all indexed benchmarks exist and match the manifest inventory. Updated catalog with missing performance metrics for Gemma 2B, Gemma 7B-it, Llama 3 70B, and Llama 3.1 8B Instruct.
 - **2026-05-01**: Provided updated `inference-perf` skill to `worker-1` with detailed `pdm` commands, connectivity tips (avoiding port 8001), and pointed to baseline benchmark results for comparison.

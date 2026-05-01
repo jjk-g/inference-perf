@@ -4,12 +4,12 @@
 
 - **Model ID**: `meta-llama/Meta-Llama-3.1-8B-Instruct`
 - **vLLM Overlay**: `packs/model-serving/overlays/kustomize/vllm/llama-3.1-8b-instruct`
-- **Status**: Benchmark Complete (Baseline)
+- **Status**: Benchmark Complete (New Record)
 - **Metrics**:
-  - Request Latency (Mean): 14.38s
-  - Time to First Token (Mean): 7.94s
-  - Throughput (Output Tokens/sec): 1135.81
-  - Success Rate: 88.5% (531/600 requests)
+  - Request Latency (Mean): 2.24s
+  - Time to First Token (Mean): 0.16s
+  - Throughput (Output Tokens/sec): 2035.01
+  - Success Rate: 93.0% (558/600 requests)
 - **Resources**: 1 NVIDIA GPU (RTX 6000 recommended)
 - **Benchmark Results**: [summary_lifecycle_metrics.json](../../benchmarks/llama-3-1-8b-instruct/summary_lifecycle_metrics.json)
 
