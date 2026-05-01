@@ -1,0 +1,28 @@
+api:
+  type: completion
+  streaming: true
+data:
+  type: random
+  input_distribution:
+    min: 128
+    max: 512
+    mean: 256.0
+    type: uniform
+  output_distribution:
+    min: 16
+    max: 128
+    mean: 64.0
+    type: uniform
+load:
+  type: constant
+  stages:
+  - rate: 0.1
+    duration: 120
+server:
+  type: vllm
+  model_name: google/gemma-7b-it
+  base_url: http://localhost:8002
+tokenizer: null
+storage:
+  local_storage:
+    path: ./results

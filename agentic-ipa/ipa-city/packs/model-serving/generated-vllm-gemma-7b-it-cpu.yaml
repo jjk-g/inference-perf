@@ -38,19 +38,28 @@ spec:
       - args:
         - --model=$(MODEL_ID)
         - --device=cpu
+        - --enforce-eager
+        - --disable-async-output-proc
+        - --worker-cls=vllm.worker.cpu_worker.CPUWorker
         command:
         - python3
         - -m
         - vllm.entrypoints.openai.api_server
         env:
+        - name: VLLM_DEVICE
+          value: cpu
+        - name: VLLM_TARGET_DEVICE
+          value: cpu
         - name: MODEL_ID
           value: google/gemma-7b-it
+        - name: VLLM_LOGGING_LEVEL
+          value: DEBUG
         - name: HUGGING_FACE_HUB_TOKEN
           valueFrom:
             secretKeyRef:
               key: hf_api_token
               name: hf-secret
-        image: vllm/vllm-openai:latest
+        image: vllm/vllm-openai:v0.6.6
         name: inference-server
         ports:
         - containerPort: 8000
@@ -63,11 +72,11 @@ spec:
           periodSeconds: 10
         resources:
           limits:
-            cpu: "8"
-            memory: 32Gi
+            cpu: "16"
+            memory: 128Gi
           requests:
-            cpu: "4"
-            memory: 16Gi
+            cpu: "8"
+            memory: 64Gi
         volumeMounts:
         - mountPath: /dev/shm
           name: dshm
