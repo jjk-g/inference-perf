@@ -5,6 +5,10 @@
 - **Model ID**: `meta-llama/Meta-Llama-3.1-8B-Instruct`
 - **vLLM Overlay**: `packs/model-serving/overlays/kustomize/vllm/llama-3.1-8b-instruct`
 - **Status**: Benchmark Complete (New Record)
+- **Optimal Configuration**:
+  - **Memory Limit**: 64Gi (Previously 32Gi, which caused OOM kills)
+  - **Readiness Probe**: `failureThreshold: 120` (Previously 60, was timing out during model load)
+  - **Benchmark base_url**: Ensure no `/v1` suffix (e.g. `http://localhost:8000`)
 - **Research Note**: 100% `token_count_mismatches` (558/558) observed in the successful run. This indicates a potential discrepancy between the server-side tokenizer and the benchmark client's tokenizer, which may affect the accuracy of the calculated throughput.
 - **Metrics**:
   - Request Latency (Mean): 2.24s

@@ -46,6 +46,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Updated Llama 3.1 and Gemma model knowledge files with optimal resource configurations (64Gi memory, 120s readiness timeout) and documented tokenizer alignment research findings. Library consistency audit passed.
 - **2026-05-01**: Updated `work/available` knowledge file to reflect that surveys for Gemma 4 (GPU), Llama 3 8B (JetStream), Gemma 7B-it (JetStream), and Llama 3 8B (JetStream GPU) are now IN PROGRESS.
 - **2026-05-01**: Fulfilled skill checkout request from `aipa_survey_packs__worker-ic-wbq`. Provided the `inference-perf` skill for benchmarking gemma4-vllm, including critical updates on port selection and URL formatting.
 - **2026-05-01**: Fulfilled skill checkout request from `aipa_survey_packs.worker-2`. Provided the `k8s-deploy` skill for performing health checks on gemma-7b-it-jetstream.
@@ -62,6 +63,9 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **2026-05-01**: Archived failed benchmark results for Llama-3.1-8B-Instruct (100% failure rate) in `failed-2026-05-01/` for post-mortem analysis. Updated main index with successful re-run results.
 - **2026-05-01**: Standardized model knowledge files (`gemma`, `llama3`, `llama3_1`, `mistral`) with latest performance metrics (latency, TTFT, throughput, success rate) and linked to benchmark summaries. Cleaned up stray `benchmark_config.yaml` from root. Library consistency audit passed.
 
+- **2026-05-01**: Research into the gemma-7b-it-jetstream failure confirms that it requires tpu-v5-lite-podslice which is currently unavailable in the cluster. Advised worker-1 to use the GPU manifest 'packs/model-serving/generated-jetstream-gemma-7b-it-gpu.yaml' as a fallback.
+- **2026-05-01**: Clarified 'inference-perf' command usage for worker-1. Confirmed that the tool does not support subcommands like 'benchmark' and requires the '--config' flag or long-form flags (e.g., '--server.model_name').
+- **2026-05-01**: Fulfilled bulk skill checkout request from worker-1. Provided 'k8s-deploy', 'model-serving', 'inference-perf', and 'perf-analysis' skills.
 - **2026-05-01**: Performed library consistency audit. Verified that all indexed benchmarks exist and match the manifest inventory. Updated catalog with missing performance metrics for Gemma 2B, Gemma 7B-it, Llama 3 70B, and Llama 3.1 8B Instruct.
 - **2026-05-01**: Provided updated `inference-perf` skill to `worker-1` with detailed `pdm` commands, connectivity tips (avoiding port 8001), and pointed to baseline benchmark results for comparison.
 - **2026-05-01**: Performed library consistency audit. Cleaned up temporary `port-forward-*.log` files and stray benchmark configs from the root directory. Verified that failed results for Llama-3.1-8B-Instruct were correctly archived and cleared the redundant `results/` directory.
