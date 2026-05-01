@@ -55,6 +55,8 @@ This process describes how to wait for a deployed model server to be healthy and
    Use `curl` or a similar tool to check the `/health` or `/v1/models` endpoint of the service.
    Checking via the `kubectl proxy` method is recommended for reliability.
 
+   **Note for JetStream**: The `/health` endpoint may return a 404; if so, check the root `/` endpoint. A 200 OK with the message 'HTTP Server for JetStream' indicates the server is healthy.
+
    Example:
    ```bash
    kubectl proxy &
@@ -62,6 +64,8 @@ This process describes how to wait for a deployed model server to be healthy and
    sleep 2
    # Using port number 8000
    curl http://localhost:8001/api/v1/namespaces/default/services/<service-name>:8000/proxy/health
+   # If 404, try:
+   # curl http://localhost:8001/api/v1/namespaces/default/services/<service-name>:8000/proxy/
    kill $PID
    ```
 
@@ -71,6 +75,12 @@ This process describes how to remove the model server resources from the Kuberne
 ### Prerequisites
 - The manifest file used for deployment (e.g., `generated-llama3-8b-manifest.yaml`).
 - `kubectl` configured with access to the cluster.
+
+### Troubleshooting: Immutable Jobs
+If applying a manifest fails with an error about immutable fields (common when switching from TPU to GPU), you may need to manually delete the data-loader job first:
+```bash
+kubectl delete job <job-name>
+```
 
 ### Process
 1. **Delete using manifest**:

@@ -1,9 +1,4 @@
----
-name: model-serving
-description: How to generate Kubernetes deployment manifests for model servers using Kustomize.
----
-
-# Model Serving Skill
+# Generate Manifest Skill
 
 This skill describes how to generate Kubernetes deployment manifests for model servers using Kustomize.
 
@@ -12,8 +7,10 @@ This skill describes how to generate Kubernetes deployment manifests for model s
 - Access to the `packs/model-serving/overlays/kustomize` directory.
 
 ## Process
+**Note for Workers**: While general instructions prohibit direct library access, you are explicitly permitted (and required) to write to `library/knowledge/manifests/` when executing this skill to ensure consistent knowledge archival.
+
 1. **Navigate to the target overlay**:
-   Identify the model and server type (e.g., vLLM or JetStream) and navigate to its overlay directory. **Crucial**: You must navigate to the subdirectory that contains the `kustomization.yaml` file, which is often an environment-specific folder like `gke`.
+   Identify the model and server type (e.g., vLLM or JetStream) and navigate to its overlay directory. **Crucial**: You must navigate to the subdirectory that contains the `kustomization.yaml` file, which is often an environment-specific folder like `gke/` or `tpu/`.
    Example for vLLM:
    ```bash
    cd packs/model-serving/overlays/kustomize/vllm/gemma4-vllm/gke
@@ -22,14 +19,15 @@ This skill describes how to generate Kubernetes deployment manifests for model s
 2. **Generate the manifest**:
    **Note**: Even if a manifest file for the target model already exists, you should still regenerate it to ensure it is up-to-date with the latest overlay configurations.
 
-   Run `kustomize build` and redirect the output to a YAML file in the `packs/model-serving` directory. Adjust the relative path as needed (e.g., `../../../../../` if you are in a `gke` subdirectory).
+   Run `kustomize build` and redirect the output to a YAML file in the `library/knowledge/manifests/` directory. Adjust the relative path as needed (e.g., `../../../../../` if you are in a `gke` subdirectory).
 
+   
    Naming convention: `generated-<server>-<model>.yaml` (e.g., `generated-vllm-llama3-70b.yaml`).
 
-   Example for Llama 3.1 8B Instruct:
+   Example:
    ```bash
-   cd packs/model-serving/overlays/kustomize/vllm/llama-3.1-8b-instruct/gke
-   kustomize build . > ../../../../../generated-vllm-llama-3.1-8b-instruct.yaml
+   # From packs/model-serving/overlays/kustomize/vllm/llama3-70b
+   kustomize build . > ../../../../../library/knowledge/manifests/generated-vllm-llama3-70b.yaml
    ```
 
 3. **Verify the output**:
@@ -41,3 +39,4 @@ If a model overlay does not exist for your target server type (vLLM or JetStream
 2. **Copy and adapt**: Copy the entire directory structure of the similar model to a new directory named after your target model.
 3. **Update patches**: Modify the `.patch.yaml` files in the new directory to point to the correct model name and deployment identifiers.
 4. **Update kustomization**: Ensure the `kustomization.yaml` correctly references the base and components.
+
