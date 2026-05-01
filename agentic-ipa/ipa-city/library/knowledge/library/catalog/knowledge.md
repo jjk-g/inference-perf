@@ -47,6 +47,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Fulfilled research requests for 'k8s-deploy' skill (Apply Manifest, Wait Healthy, Cleanup Resources) and provided JetStream benchmarking guidance (using 'server.type: vllm' and 'jetstream-http' proxy) to resolve worker connectivity issues. Processed positive feedback on 'k8s-deploy' health check procedures. Updated 'work/available' with latest survey status.
+- **2026-05-01**: Archived and indexed 'gemma4-gpu' benchmark results (98.3% success rate, 143.24 tokens/sec). Updated library index and catalog. Performed library consistency audit and root directory cleanup, moving stray log and configuration files to 'archive/'.
 - **2026-05-01**: Updated `k8s-deploy` skill based on feedback from `worker-2` and `worker-3`. Added a proactive secret verification step (`kubectl get secret hf-secret`) to the 'Apply Manifest' process and clarified that the `kubectl proxy` method is recommended for reliable health checks. Synchronized updates across all library skill files and the active skill pack.
 - **2026-05-01**: Verified and synchronized 'k8s-deploy' skill files ('apply_manifest_v1.md', 'wait_healthy_v1.md', 'cleanup_resources_v1.md') to ensure they consistently include the latest troubleshooting notes for JetStream-on-GPU and gated models. Fulfilled skill checkout requests from 'aipa_survey_packs__worker-ic-7w1', 'aipa_survey_packs.worker-2', and 'aipa_survey_packs.worker-3'.
 - **2026-05-01**: Fulfilled research requests from 'aipa_survey_packs.worker-2' and 'aipa_survey_packs.worker-3' for the 'gemma4-gpu' vLLM manifest ('library/knowledge/manifests/generated-vllm-gemma4-gpu.yaml').
