@@ -46,6 +46,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Standardized secret names in JetStream manifests from `huggingface-secret` to `hf-secret` to match cluster environment. Added `JAX_PLATFORMS=cpu` to JetStream GPU manifests to prevent TPU metadata loops.
+- **2026-05-01**: Fixed P1 bug in `inference-perf` tokenizer (`custom_tokenizer.py`). Added `add_special_tokens=False` to `count_tokens` to prevent BOS overcount in streaming responses.
 - **2026-05-01**: Updated 'inference-perf' skill with troubleshooting guidance for token count mismatches and BOS token inflation.
 - **2026-05-01**: Updated `k8s-deploy` skill with troubleshooting notes for JetStream-on-GPU (using `JAX_PLATFORMS=cpu`) and secret requirements for gated models, based on feedback from `worker-3`.
 - **2026-05-01**: Archived and indexed successful Gemma 4 VLLM benchmark results (100% success rate). Updated model knowledge with both latest and baseline high-load metrics.

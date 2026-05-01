@@ -55,6 +55,8 @@ spec:
         env:
         - name: TENSOR_PARALLEL_SIZE
           value: "1"
+        - name: JAX_PLATFORMS
+          value: "cpu"
         image: us-docker.pkg.dev/cloud-tpu-images/inference/jetstream-pytorch-server:v0.2.3
         name: inference-server
         ports:
@@ -126,7 +128,7 @@ spec:
       - name: huggingface-credentials
         secret:
           defaultMode: 256
-          secretName: huggingface-secret
+          secretName: hf-secret
       - name: kaggle-credentials
         secret:
           defaultMode: 256

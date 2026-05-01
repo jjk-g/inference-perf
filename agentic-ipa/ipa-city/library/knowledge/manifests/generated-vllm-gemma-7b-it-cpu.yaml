@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: gemma-7b-it-vllm-cpu-inference-server
+  name: gemma-7b-it-vllm-cpu-service
+spec:
+  ports:
+  - port: 8000
+    protocol: TCP
+    targetPort: 8000
+  selector:
+    app: gemma-7b-it-vllm-cpu-inference-server
+    deployment: gemma-7b-it-vllm-cpu-deployment
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: gemma-7b-it-vllm-cpu-inference-server
+  name: gemma-7b-it-vllm-cpu-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gemma-7b-it-vllm-cpu-inference-server
+      deployment: gemma-7b-it-vllm-cpu-deployment
+  template:
+    metadata:
+      labels:
+        ai.gke.io/inference-server: vllm
+        ai.gke.io/model: gemma-7b-it
+        app: gemma-7b-it-vllm-cpu-inference-server
+        deployment: gemma-7b-it-vllm-cpu-deployment
+    spec:
+      containers:
+      - args:
+        - --model=$(MODEL_ID)
+        - --device=cpu
+        command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+        env:
+        - name: MODEL_ID
+          value: google/gemma-7b-it
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: hf_api_token
+              name: hf-secret
+        image: vllm/vllm-openai:latest
+        name: inference-server
+        ports:
+        - containerPort: 8000
+          name: metrics
+        readinessProbe:
+          failureThreshold: 120
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: "8"
+            memory: 32Gi
+          requests:
+            cpu: "4"
+            memory: 16Gi
