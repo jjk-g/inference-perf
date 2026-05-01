@@ -40,11 +40,16 @@ spec:
         - --device=cpu
         - --disable-async-output-proc
         - --enforce-eager
+        - --worker-cls=vllm.worker.cpu_worker.CPUWorker
+        - --disable-frontend-multiprocessing
+        - --block-size=16
         command:
         - python3
         - -m
         - vllm.entrypoints.openai.api_server
         env:
+        - name: VLLM_DEVICE
+          value: cpu
         - name: VLLM_TARGET_DEVICE
           value: cpu
         - name: MODEL_ID

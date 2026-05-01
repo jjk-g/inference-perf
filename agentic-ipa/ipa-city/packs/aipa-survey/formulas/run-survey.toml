@@ -5,7 +5,8 @@ should not run the commands directly but should delegate them to specialized wor
 This formula is dynamic and expects a `model` variable.
 """
 formula = "run-survey"
-version = 4
+title = "Survey for {{model}}"
+version = 6
 
 [vars]
 model = { description = "Model name to survey", required = true }
@@ -15,62 +16,62 @@ model_server_configuration = { description = "Optional model server configuratio
 
 [[steps]]
 id = "delegate-generation"
-title = "1. Delegate Manifest Generation"
+title = "1. Delegate Manifest Generation for {{model}}"
 description = """
-Instruct the agent to create a task for manifest generation for the model {{.model}}.
+Instruct the agent to create a task for manifest generation for the model {{model}}.
 Example using `bd`:
 ```bash
-bd create "Generate manifest for {{.model}}" --label formula=generate-manifest
+bd create "Generate manifest for {{model}}" --label formula=generate-manifest
 ```
 Wait for the worker to complete this task and record the manifest path in the store.
 """
 
 [[steps]]
 id = "delegate-deployment"
-title = "2. Delegate Deployment"
+title = "2. Delegate Deployment for {{model}}"
 description = """
 Once the manifest is generated, instruct the agent to create tasks for deployment and health check.
 Example using `bd`:
 ```bash
-bd create "Deploy {{.model}}" --label formula=apply-manifest
+bd create "Deploy {{model}}" --label formula=apply-manifest
 ```
-bd create "Health check {{.model}}" --label formula=wait-healthy
+bd create "Health check {{model}}" --label formula=wait-healthy
 ```
 Wait for these tasks to be completed by the deployment worker.
 """
 
 [[steps]]
 id = "delegate-benchmarking"
-title = "3. Delegate Benchmarking"
+title = "3. Delegate Benchmarking for {{model}}"
 description = """
 Once the server is healthy, instruct the agent to create a task for running the benchmark.
-Include the benchmark description to inform the worker: "{{.benchmark_desc}}".
+Include the benchmark description to inform the worker: "{{benchmark_desc}}".
 Example using `bd`:
 ```bash
-bd create "Benchmark {{.model}} - {{.benchmark_desc}}" --label formula=run-benchmark
+bd create "Benchmark {{model}} - {{benchmark_desc}}" --label formula=run-benchmark
 ```
 Wait for the testing worker to complete the run and save results.
 """
 
 [[steps]]
 id = "delegate-archiving"
-title = "4. Delegate Archiving"
+title = "4. Delegate Archiving for {{model}}"
 description = """
 Once benchmarking is complete, instruct the agent to create a task for archiving and indexing.
 Example using `bd`:
 ```bash
-bd create "Archive results for {{.model}}" --label formula=archive-results
+bd create "Archive results for {{model}}" --label formula=archive-results
 ```
 """
 
 [[steps]]
 id = "delegate-cleanup"
-title = "5. Delegate Cleanup"
+title = "5. Delegate Cleanup for {{model}}"
 description = """
 Once results are archived, instruct the agent to create a task for cleaning up K8s resources.
 Example using `bd`:
 ```bash
-bd create "Cleanup resources for {{.model}}" --label action=cleanup
+bd create "Cleanup resources for {{model}}" --label action=cleanup
 ```
 The task should instruct the worker to delete the deployment and service created for the model.
 """
