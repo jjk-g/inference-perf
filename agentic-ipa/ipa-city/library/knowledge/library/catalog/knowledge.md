@@ -44,6 +44,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Standardized model knowledge files (`gemma`, `llama3`, `llama3_1`, `mistral`) with latest performance metrics (latency, TTFT, throughput, success rate) and linked to benchmark summaries. Cleaned up stray `benchmark_config.yaml` from root. Library consistency audit passed.
 - **2026-05-01**: Archived failed benchmark results for Llama-3.1-8B-Instruct (100% failure rate). Results stored in `library/knowledge/benchmarks/llama-3-1-8b-instruct/failed-2026-05-01/`. Worker notified of `inference-perf` CLI corrections. Analysis indicates pod termination during startup.
 
 - **2026-05-01**: Performed library consistency audit. Verified that all indexed benchmarks exist and match the manifest inventory. Updated catalog with missing performance metrics for Gemma 2B, Gemma 7B-it, Llama 3 70B, and Llama 3.1 8B Instruct.

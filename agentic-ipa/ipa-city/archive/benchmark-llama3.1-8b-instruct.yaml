@@ -1,0 +1,29 @@
+api:
+  type: completion
+  streaming: true
+data:
+  type: random
+  input_distribution:
+    min: 128
+    max: 1024
+    mean: 512.0
+    type: uniform
+  output_distribution:
+    min: 16
+    max: 256
+    mean: 128.0
+    type: uniform
+load:
+  type: constant
+  stages:
+  - rate: 10
+    duration: 60
+server:
+  type: vllm
+  model_name: meta-llama/Meta-Llama-3.1-8B-Instruct
+  base_url: http://localhost:8088/v1
+tokenizer:
+  pretrained_model_name_or_path: meta-llama/Meta-Llama-3.1-8B-Instruct
+storage:
+  local_storage:
+    path: ./results
