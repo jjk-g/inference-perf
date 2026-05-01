@@ -39,6 +39,7 @@ spec:
         - --model=$(MODEL_ID)
         - --device=cpu
         - --enforce-eager
+        - --disable-async-output-proc
         command:
         - python3
         - -m
