@@ -6,6 +6,7 @@ This document summarizes the current status of work available for Worker agents 
 
 As of today, the ready work items include:
 - **Active Surveys**: Surveys are IN PROGRESS for Gemma 4 (GPU), Llama 3 8B (JetStream), Gemma 7B-it (JetStream), and Llama 3 8B (JetStream GPU).
+- **CPU Fallback Surveys**: CPU-based manifests are READY for Gemma 7B-it (`generated-vllm-gemma-7b-it-cpu.yaml`) and Llama 3 8B (`generated-vllm-llama3-8b-cpu.yaml`). These should be used to address TPU unavailability.
 - **Re-Survey Opportunity**: Gemma 7B-it (vLLM) previously failed (0% success) and needs investigation/re-run.
 - **Verification**: Library consistency audit and Mistral-7B-v0.3 survey archival complete (2026-05-01).
 

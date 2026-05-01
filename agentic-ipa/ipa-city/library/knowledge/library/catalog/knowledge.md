@@ -25,7 +25,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmarks/gemma-2b**: Performance results for gemma-2b. Achieved 4592.15 output tokens/sec with a 94.0% success rate (564/600 requests).
 - **benchmarks/gemma4-vllm**: Performance results for gemma4-vllm. Achieved 100% success rate (150/150 requests) in latest run. Baseline high-load run achieved 1286.38 output tokens/sec.
 - **benchmarks/llama3-8b**: Performance results for llama3-8b. Achieved 1350.18 output tokens/sec with 0 failures (600/600 requests). Survey run on 2026-05-01.
-- **benchmarks/llama3-8b-gpu**: (Pending) Deployment configuration for JetStream on GPUs.
+- **benchmarks/llama3-8b-gpu**: (In Progress) Deployment configuration for JetStream on GPUs. Manifest generated and deployment in progress.
 - **benchmarks/llama3-70b**: Performance results for llama3-70b. Achieved 185.88 output tokens/sec with a 91.7% success rate (55/60 requests).
 - **benchmarks/llama-3.1-70b**: Performance results for Llama-3.1-70B. Achieved 1510.63 output tokens/sec with 0 failures (600/600 requests).
 - **benchmarks/llama-3-1-8b-instruct**: Performance results for Llama 3.1 8B Instruct. Achieved a new record of 2035.01 output tokens/sec with a 93% success rate (558/600 requests). Survey run on 2026-05-01.
@@ -46,6 +46,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Performed library consistency audit and root directory cleanup. Moved stray utility scripts (`process_mail.py`, `fix_archive.py`, `jetstream_proxy.py`) to `archive/`. Verified that all indexed skills and knowledge domains are present and consistent with the manifest inventory.
+- **2026-05-01**: Fulfilled research request from Mayor regarding CPU-based manifests. Provided links to the new Gemma 7B-it and Llama 3 8B CPU manifests and updated the `work/available` knowledge domain to reflect these ready opportunities.
 - **2026-05-01**: Fulfilled skill checkout request from `worker-1` for the `k8s-deploy` skill to support several upcoming deployment tasks.
 - **2026-05-01**: Fulfilled research requests from `worker-ic-ou5n`, `worker-ic-hf5s`, and `worker-3` regarding the Gemma 7B-it JetStream GPU survey (`ic-mol-hx4p`). Provided `apply_manifest` and `wait_healthy` skills and pointed to the existing manifest.
 - **2026-05-01**: Performed library consistency audit. Cleaned up stray log and config files from the root directory (`port-forward.log`, `proxy.log`, `test_config.yaml`, etc.) to `archive/`. Verified all indexed benchmarks and skills are present.
