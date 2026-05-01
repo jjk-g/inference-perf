@@ -9,3 +9,15 @@ spec:
         ai.gke.io/model: LLaMA3_1_8B_Instruct
         ai.gke.io/inference-server: vllm
         examples.ai.gke.io/source: blueprints
+    spec:
+      containers:
+      - name: inference-server
+        resources:
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: "32Gi"
+            nvidia.com/gpu: 1
