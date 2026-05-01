@@ -44,7 +44,7 @@ spec:
         - -m
         - vllm.entrypoints.openai.api_server
         env:
-        - name: VLLM_TARGET_DEVICE
+        - name: VLLM_DEVICE
           value: cpu
         - name: MODEL_ID
           value: google/gemma-7b-it

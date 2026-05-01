@@ -16,8 +16,9 @@ spec:
         - --model=$(MODEL_ID)
         - --device=cpu
         - --enforce-eager
+        - --disable-async-output-proc
         env:
-        - name: VLLM_TARGET_DEVICE
+        - name: VLLM_DEVICE
           value: cpu
         resources:
           requests:

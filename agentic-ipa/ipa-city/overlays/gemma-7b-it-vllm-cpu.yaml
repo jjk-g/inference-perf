@@ -46,7 +46,7 @@ spec:
         env:
         - name: MODEL_ID
           value: google/gemma-7b-it
-        - name: VLLM_DEVICE
+        - name: VLLM_TARGET_DEVICE
           value: cpu
         - name: VLLM_LOGGING_LEVEL
           value: DEBUG
