@@ -5,7 +5,6 @@ api:
   slo_unit: null
   slo_tpot_header: null
   slo_ttft_header: null
-  response_format: null
 data:
   type: random
   path: null
@@ -15,22 +14,14 @@ data:
     mean: 512.0
     std_dev: 200.0
     total_count: 61
-    type: uniform
-    variance: null
-    skew: 0.0
   output_distribution:
     min: 16
     max: 256
     mean: 128.0
     std_dev: 200.0
     total_count: 61
-    type: uniform
-    variance: null
-    skew: 0.0
   shared_prefix: null
   trace: null
-  otel_trace_replay: null
-  conversation_replay: null
 load:
   type: constant
   interval: 1.0
@@ -71,11 +62,6 @@ report:
   prometheus:
     summary: true
     per_stage: false
-  session_lifecycle:
-    summary: true
-    per_stage: true
-    per_session: false
-  goodput: null
 storage:
   local_storage:
     path: report-llama3-70b-survey
