@@ -46,6 +46,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Verified and synchronized 'k8s-deploy' skill files ('apply_manifest_v1.md', 'wait_healthy_v1.md', 'cleanup_resources_v1.md') to ensure they consistently include the latest troubleshooting notes for JetStream-on-GPU and gated models. Fulfilled skill checkout requests from 'aipa_survey_packs__worker-ic-7w1', 'aipa_survey_packs.worker-2', and 'aipa_survey_packs.worker-3'.
+- **2026-05-01**: Fulfilled research requests from 'aipa_survey_packs.worker-2' and 'aipa_survey_packs.worker-3' for the 'gemma4-gpu' vLLM manifest ('library/knowledge/manifests/generated-vllm-gemma4-gpu.yaml').
 - **2026-05-01**: Performed library consistency audit and root directory cleanup. Moved stray utility scripts (`process_mail.py`, `fix_archive.py`, `jetstream_proxy.py`) to `archive/`. Verified that all indexed skills and knowledge domains are present and consistent with the manifest inventory.
 - **2026-05-01**: Fulfilled research request from Mayor regarding CPU-based manifests. Provided links to the new Gemma 7B-it and Llama 3 8B CPU manifests and updated the `work/available` knowledge domain to reflect these ready opportunities.
 - **2026-05-01**: Fulfilled skill checkout request from `worker-1` for the `k8s-deploy` skill to support several upcoming deployment tasks.

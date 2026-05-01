@@ -29,6 +29,8 @@ If the command fails, check for the following common issues:
 - **Invalid YAML**: Verify that the manifest file was not corrupted during generation or transfer. Run `kubectl apply --dry-run=client -f <manifest-path>` to check for syntax errors.
 - **Connection Refused**: Ensure the cluster is reachable and your `kubeconfig` is properly configured.
 - **Resource Conflict**: If a resource already exists and cannot be patched, you may need to delete it first using `kubectl delete -f <manifest-path>` before re-applying.
+- **JetStream-on-GPU**: If using JetStream on GPUs, ensure `JAX_PLATFORMS=cpu` is set in the manifest to prevent TPU metadata loops.
+- **Gated Models**: Ensure the `hf-secret` (formerly `huggingface-secret`) is present in the namespace for models requiring authentication (e.g., Llama 3, Gemma).
 
 ## Wait Healthy
 This process describes how to wait for a deployed model server to be healthy and ready.
