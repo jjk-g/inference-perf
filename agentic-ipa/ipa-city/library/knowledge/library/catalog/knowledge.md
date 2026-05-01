@@ -44,7 +44,9 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Updated `generate_manifest` skill based on worker feedback to clarify navigation into environment-specific subdirectories (e.g., `gke/`).
 - **2026-05-01**: Standardized manifest filenames in `library/knowledge/manifests/` to follow the `generated-<server>-<model>.yaml` convention. Updated references in the library catalog and model knowledge files. Redundant manifests removed.
+- **2026-05-01**: Updated `archive_results` skill with explicit instructions for cleaning up temporary `port-forward-*.log` files from the root directory.
 - **2026-05-01**: Updated llama3-8b benchmark results with new high-performance run (1350.18 tokens/sec).
 - **2026-05-01**: Updated llama-3.1-70b benchmark results with new high-performance run (1510.63 tokens/sec).
 - **2026-05-01**: Archived new Mistral-7B-v0.3 benchmark results from latest survey. Updated catalog summary with new performance metrics (299.68 tokens/sec).

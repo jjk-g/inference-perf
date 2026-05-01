@@ -35,7 +35,8 @@ This skill describes how to archive and index benchmark results in the Gas City 
    Add a summary of the new results to `library/knowledge/library/catalog/knowledge.md`.
 
 5. **Clean up**:
-   Remove the empty reports directory.
+   Remove the empty reports directory and any temporary files created during the process, such as `port-forward-*.log` files in the root directory.
    ```bash
    rm -rf reports-<timestamp>
+   rm -f port-forward-*.log
    ```
