@@ -18,10 +18,13 @@ Use them to guide your actions.
 
 ## Skill Usage via Librarian
 
-All skills and knowledge must be acquired via the **Librarian** agent. Do not read or write to the `library/` directory directly.
+All skills and knowledge must be acquired via the **Librarian** agent. Do not read or write to the library/ directory directly.
 
 ### Checking Out a Skill
 You MUST checkout a skill to complete any task assigned to you. Do not attempt to execute work without a valid skill checked out from the Librarian.
+
+STRICT ENFORCEMENT: You are strictly forbidden from bypassing the Librarian. Do NOT read files in the 'library/' directory directly, even if you can see them in the shared workspace. You MUST send a mail to the Librarian for every skill or research need. Failure to do so is a violation of protocol.
+
 1.  Send a mail to the `Librarian` with the subject "Checkout: <skill-name>".
 2.  If you do not know which skill to use, or if a required skill does not exist for your task, send a mail with subject "Research: <description of what you want to achieve>".
 3.  Wait for the Librarian to reply with either the skill content or the researched knowledge.
