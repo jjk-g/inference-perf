@@ -46,6 +46,9 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Fulfilled skill checkout request from `worker-1` for the `k8s-deploy` skill to support several upcoming deployment tasks.
+- **2026-05-01**: Fulfilled research requests from `worker-ic-ou5n`, `worker-ic-hf5s`, and `worker-3` regarding the Gemma 7B-it JetStream GPU survey (`ic-mol-hx4p`). Provided `apply_manifest` and `wait_healthy` skills and pointed to the existing manifest.
+- **2026-05-01**: Performed library consistency audit. Cleaned up stray log and config files from the root directory (`port-forward.log`, `proxy.log`, `test_config.yaml`, etc.) to `archive/`. Verified all indexed benchmarks and skills are present.
 - **2026-05-01**: Regenerated CPU-based manifests for Gemma 7B-it and Llama 3 8B vLLM servers to address TPU unavailability. Created new `cpu` overlays in `packs/model-serving/overlays/kustomize/` for these models. Updated manifest inventory.
 - **2026-05-01**: Fulfilled research request from Mayor for pending surveys. Identified opportunities for Gemma 7B-it (vLLM re-survey), Gemma 7B-it (CPU), Llama 3 8B (CPU), and Gemma 7B-it (JetStream GPU).
 - **2026-05-01**: Updated `inference-perf` skill based on worker feedback: emphasized YAML configuration and documented vLLM completion API path behavior.

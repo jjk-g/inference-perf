@@ -9,3 +9,22 @@ spec:
         ai.gke.io/model: gemma-7b-it
         ai.gke.io/inference-server: vllm
         examples.ai.gke.io/source: blueprints
+    spec:
+      containers:
+      - name: inference-server
+        resources:
+          requests:
+            cpu: "4"
+            memory: "32Gi"
+            nvidia.com/gpu: 1
+          limits:
+            cpu: "8"
+            memory: "64Gi"
+            nvidia.com/gpu: 1
+        readinessProbe:
+          initialDelaySeconds: 60
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 60
+          periodSeconds: 10

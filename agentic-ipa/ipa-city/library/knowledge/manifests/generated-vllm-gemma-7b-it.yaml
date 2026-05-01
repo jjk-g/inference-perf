@@ -63,11 +63,16 @@ spec:
           httpGet:
             path: /health
             port: 8000
+          initialDelaySeconds: 60
           periodSeconds: 10
         resources:
           limits:
+            cpu: "8"
+            memory: 64Gi
             nvidia.com/gpu: 1
           requests:
+            cpu: "4"
+            memory: 32Gi
             nvidia.com/gpu: 1
         volumeMounts:
         - mountPath: /dev/shm

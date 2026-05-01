@@ -26,7 +26,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             }
             
             req = urllib.request.Request(
-                "http://localhost:8002/generate",
+                "http://localhost:8004/generate",
                 data=json.dumps(jetstream_data).encode(),
                 headers={"Content-Type": "application/json"},
                 method='POST'
