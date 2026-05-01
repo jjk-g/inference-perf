@@ -43,8 +43,8 @@ spec:
         - -m
         - vllm.entrypoints.openai.api_server
         env:
-        - name: VLLM_LOGGING_LEVEL
-          value: DEBUG
+        - name: VLLM_TARGET_DEVICE
+          value: cpu
         - name: MODEL_ID
           value: google/gemma-7b-it
         - name: HUGGING_FACE_HUB_TOKEN
@@ -52,7 +52,7 @@ spec:
             secretKeyRef:
               key: hf_api_token
               name: hf-secret
-        image: vllm/vllm-openai:latest
+        image: vllm/vllm-openai:v0.6.6
         name: inference-server
         ports:
         - containerPort: 8000

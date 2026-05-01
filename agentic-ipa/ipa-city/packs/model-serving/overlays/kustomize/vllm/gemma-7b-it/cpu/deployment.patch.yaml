@@ -11,12 +11,13 @@ spec:
     spec:
       containers:
       - name: inference-server
+        image: vllm/vllm-openai:v0.6.6
         args:
         - --model=$(MODEL_ID)
         - --device=cpu
         env:
-        - name: VLLM_LOGGING_LEVEL
-          value: DEBUG
+        - name: VLLM_TARGET_DEVICE
+          value: cpu
         resources:
           requests:
             cpu: "4"
