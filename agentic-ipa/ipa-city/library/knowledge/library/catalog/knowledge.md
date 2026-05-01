@@ -46,6 +46,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Updated `k8s-deploy` skill with troubleshooting notes for JetStream-on-GPU (using `JAX_PLATFORMS=cpu`) and secret requirements for gated models, based on feedback from `worker-3`.
 - **2026-05-01**: Archived and indexed successful Gemma 4 VLLM benchmark results (100% success rate). Updated model knowledge with both latest and baseline high-load metrics.
 - **2026-05-01**: Identified 100% failure rate in recent Gemma 4 VLLM benchmark attempt (`gemma4-vllm-report/`). Discovered potential issue with complex Kubernetes proxy `base_url` routing. Informed the benchmarking worker for further investigation.
 - **2026-05-01**: Updated Llama 3.1 and Gemma model knowledge files with optimal resource configurations (64Gi memory, 120s readiness timeout) and documented tokenizer alignment research findings. Library consistency audit passed.

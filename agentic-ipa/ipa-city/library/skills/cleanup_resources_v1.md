@@ -1,39 +1,76 @@
-# Cleanup Resources Skill
+---
+name: k8s-deploy
+description: Skills for deploying and verifying model servers on Kubernetes.
+---
 
-This skill describes how to remove model server resources from the Kubernetes cluster after a task is complete.
+# K8s Deploy Skill
 
-## Prerequisites
+This skill covers deploying model servers and waiting for them to become healthy.
+
+## Apply Manifest
+This process describes how to deploy a model server using a generated Kubernetes manifest.
+
+### Prerequisites
+- A generated manifest file (e.g., `generated-llama3-8b-manifest.yaml`).
+- `kubectl` configured with access to the cluster.
+
+### Process
+1. **Locate the manifest file**: Ensure the manifest for the model is available in the current directory or specified path.
+2. **Apply the manifest**:
+   ```bash
+   kubectl apply -f <manifest-path>
+   ```
+3. **Verify Submission**:
+   The command should output `service/<name> created` and `deployment/<name> created`.
+
+## Wait Healthy
+This process describes how to wait for a deployed model server to be healthy and ready.
+
+### Prerequisites
+- `kubectl` configured.
+- The name of the deployment or service to check.
+
+### Process
+1. **Wait for deployment rollout**:
+   ```bash
+   kubectl rollout status deployment/<deployment-name>
+   ```
+
+2. **Check health endpoint**:
+   Use `curl` or a similar tool to check the `/health` or `/v1/models` endpoint of the service.
+
+   Example:
+   ```bash
+   kubectl proxy &
+   PID=$!
+   sleep 2
+   # Using port number 8000
+   curl http://localhost:8001/api/v1/namespaces/default/services/<service-name>:8000/proxy/health
+   kill $PID
+   ```
+
+## Cleanup Resources
+This process describes how to remove the model server resources from the Kubernetes cluster.
+
+### Prerequisites
 - The manifest file used for deployment (e.g., `generated-llama3-8b-manifest.yaml`).
 - `kubectl` configured with access to the cluster.
 
-## Process
-
-### 1. Delete using manifest
-If the manifest file is available, use it to delete all associated resources:
-```bash
-kubectl delete -f <manifest-path>
-```
-Example:
-```bash
-kubectl delete -f library/knowledge/manifests/generated-vllm-llama3-8b.yaml
-```
-
-### 2. Manual Deletion
-If the manifest is not available, delete the deployment and service by name:
-```bash
-kubectl delete deployment <deployment-name>
-kubectl delete service <service-name>
-```
-
-### 3. Verify Deletion
-Ensure the resources are no longer listed:
-```bash
-kubectl get deployment <deployment-name>
-kubectl get service <service-name>
-```
-The commands should return an error like `Error from server (NotFound)`.
-
-## Best Practices
-- **Cleanup promptly**: Remove resources as soon as benchmarking and archiving are complete to free up cluster capacity.
-- **Verification**: Always verify that the resources are actually gone.
-- **Idempotency**: `kubectl delete` is generally idempotent; running it multiple times is safe.
+### Process
+1. **Delete using manifest**:
+   If the manifest file is available, use it to delete all associated resources:
+   ```bash
+   kubectl delete -f <manifest-path>
+   ```
+2. **Manual Deletion** (if manifest is unavailable):
+   If the manifest is not available, delete the deployment and service by name:
+   ```bash
+   kubectl delete deployment <deployment-name>
+   kubectl delete service <service-name>
+   ```
+3. **Verify Deletion**:
+   Ensure the resources are no longer listed:
+   ```bash
+   kubectl get deployment <deployment-name>
+   kubectl get service <service-name>
+   ```
