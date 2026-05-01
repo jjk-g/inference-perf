@@ -43,6 +43,8 @@ spec:
         - -m
         - vllm.entrypoints.openai.api_server
         env:
+        - name: VLLM_LOGGING_LEVEL
+          value: DEBUG
         - name: MODEL_ID
           value: google/gemma-7b-it
         - name: HUGGING_FACE_HUB_TOKEN

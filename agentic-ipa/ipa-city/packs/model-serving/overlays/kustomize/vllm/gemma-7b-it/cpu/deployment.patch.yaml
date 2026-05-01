@@ -14,6 +14,9 @@ spec:
         args:
         - --model=$(MODEL_ID)
         - --device=cpu
+        env:
+        - name: VLLM_LOGGING_LEVEL
+          value: DEBUG
         resources:
           requests:
             cpu: "4"
