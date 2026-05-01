@@ -9,7 +9,9 @@ version = 4
 
 [vars]
 model = { description = "Model name to survey", required = true }
-benchmark_desc = { description = "Description of the benchmark to run", default = "Standard performance survey" }
+benchmark_desc = { description = "Description of the benchmark to run", required = true }
+accelerator = { description = "Optional accelerator type (e.g., GPU, TPU)", default = "GPU" }
+model_server_configuration = { description = "Optional model server configuration", default = "default" }
 
 [[steps]]
 id = "delegate-generation"

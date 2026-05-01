@@ -1,0 +1,33 @@
+api:
+  type: completion
+  streaming: true
+data:
+  type: random
+  input_distribution:
+    min: 128
+    max: 1024
+    mean: 512
+    total_count: 300
+    type: uniform
+  output_distribution:
+    min: 16
+    max: 256
+    mean: 128
+    total_count: 300
+    type: uniform
+load:
+  type: constant
+  stages:
+  - rate: 5.0
+    duration: 60
+  num_workers: 8
+server:
+  type: vllm
+  model_name: meta-llama/Meta-Llama-3-8B
+  base_url: http://localhost:8005
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: meta-llama/Meta-Llama-3-8B
+storage:
+  local_storage:
+    path: report-llama3-8b-worker
