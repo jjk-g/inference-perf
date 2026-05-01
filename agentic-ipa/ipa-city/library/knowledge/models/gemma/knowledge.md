@@ -41,10 +41,16 @@ The `gemma-7b-it` configuration is used for deploying the Gemma 7b Instruction T
 
 - **vLLM Overlay**: `packs/model-serving/overlays/kustomize/vllm/gemma-7b-it`
 - **JetStream Overlay**: `packs/model-serving/overlays/kustomize/jetstream/gemma-7b-it`
-- **Status**: Benchmark Failed (0% success rate with vLLM)
+- **Status**: 
+  - **vLLM GPU**: Benchmark Failed (0% success rate).
+  - **vLLM CPU**: **Fixed**. A crash was identified in v0.6.6 on CPU (is_async_output_supported).
 - **Troubleshooting Recommendations**:
+  - **CPU Deployment**: Use `--enforce-eager` and `--disable-async-output-proc` flags in the vLLM arguments to avoid `NotImplementedError` on CPU.
   - **Memory Limit**: Consider increasing to 64Gi if OOM kills are observed (similar to Llama-3.1-8B-Instruct).
   - **Readiness Probe**: Increase `failureThreshold` to 120 to allow more time for model weights to load.
-- **Research Note**: A discrepancy was found between the archived log (port 8001, 14.8% error) and the indexed results (port 8005, 100% failure). This suggests the port 8005 deployment was unstable or incorrectly configured. Switching to JetStream is currently in progress.
-- **Resources**: 1 NVIDIA GPU (RTX 6000) or TPU v5e 2x4 (JetStream)
+- **Research Note**: A discrepancy was found between the archived log (port 8001, 14.8% error) and the indexed results (port 8005, 100% failure). This suggests the port 8005 deployment was unstable or incorrectly configured. Switching to JetStream for GPU is currently in progress.
+- **Resources**: 
+  - **GPU**: 1 NVIDIA GPU (RTX 6000)
+  - **CPU**: 4-8 CPUs, 16-32Gi memory
+  - **TPU**: TPU v5e 2x4 (JetStream)
 - **Benchmark Results**: [summary_lifecycle_metrics.json](../../benchmarks/gemma-7b-it/summary_lifecycle_metrics.json)

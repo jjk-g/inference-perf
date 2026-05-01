@@ -40,6 +40,7 @@ spec:
         - --device=cpu
         - --enforce-eager
         - --disable-async-output-proc
+        - --worker-cls=vllm.worker.cpu_worker.CPUWorker
         command:
         - python3
         - -m
