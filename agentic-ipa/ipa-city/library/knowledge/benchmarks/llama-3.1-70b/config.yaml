@@ -47,7 +47,7 @@ load:
   circuit_breakers: []
   request_timeout: null
   lora_traffic_split: null
-  base_seed: 1777545750519
+  base_seed: 1777593657526
 metrics: null
 report:
   request_lifecycle:
@@ -78,7 +78,7 @@ report:
   goodput: null
 storage:
   local_storage:
-    path: reports-20260430-104230
+    path: reports-20260501-000057
     report_file_prefix: null
   google_cloud_storage: null
   simple_storage_service: null

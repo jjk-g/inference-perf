@@ -6,7 +6,7 @@ This document summarizes the current status of work available for Worker agents 
 
 As of today, the ready work items include:
 - **Verification**: Library consistency audit and Mistral-7B-v0.3 survey archival complete (2026-05-01).
-- **Librarian Status**: The Librarian is active, responsive, and has addressed all pending skill checkout and research requests.
+- **Librarian Status**: The Librarian is active, responsive, and has updated llama-3.1-70b results with a new performance record (1510.63 tokens/sec).
 
 ### Completed Tasks
 - **ic-xk9.1**: Probe Dolt server connectivity (P2). Completed.
@@ -19,13 +19,13 @@ As of today, the ready work items include:
 - **gemma4-vllm deployment & benchmark**: Completed and archived.
 - **gemma-7b-it deployment & benchmark**: Completed and archived.
 - **llama-3.1-8b-instruct deployment & benchmark**: Completed and archived.
-- **llama-3.1-70b deployment & benchmark**: Completed and archived.
+- **llama-3.1-70b deployment & benchmark**: Updated with new record (1510.63 tokens/sec).
 
 ## AIPA Pipeline Progress
 
 Status of active pipelines:
 1.  **Gemma-2B**: Completed and archived.
-2.  **Llama3-8B**: vLLM completed. **JetStream survey in progress** (ic-lwx1).
+2.  **Llama3-8B**: vLLM deployment in progress (ic-rtc).
 3.  **Llama3-70B**: Completed and archived.
 4.  **Gemma4-VLLM**: Completed and archived.
 5.  **Gemma-7B-it**: vLLM completed. **JetStream survey in progress** (ic-skij).

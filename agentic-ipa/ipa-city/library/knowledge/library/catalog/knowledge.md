@@ -23,10 +23,10 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmarks/gemma-7b-it**: Performance results and metrics for the gemma-7b-it model deployment.
 - **benchmarks/gemma-2b**: Performance results and metrics for the gemma-2b model deployment.
 - **benchmarks/gemma4-vllm**: Performance results for gemma4-vllm. Achieved 6294.37 total tokens/sec with a 95.2% success rate (571/600 requests).
-- **benchmarks/llama3-8b**: Performance results and metrics for the llama3-8b model deployment (TPU).
+- **benchmarks/llama3-8b**: Performance results for llama3-8b. Achieved 1350.18 output tokens/sec with 0 failures (600/600 requests). Survey run on 2026-05-01.
 - **benchmarks/llama3-8b-gpu**: (Pending) Deployment configuration for JetStream on GPUs.
 - **benchmarks/llama3-70b**: Performance results and metrics for the llama3-70b model deployment.
-- **benchmarks/llama-3.1-70b**: Performance results for Llama-3.1-70B. Achieved 1314.44 output tokens/sec with 0 failures (600/600 requests).
+- **benchmarks/llama-3.1-70b**: Performance results for Llama-3.1-70B. Achieved 1510.63 output tokens/sec with 0 failures (600/600 requests).
 - **benchmarks/llama-3-1-8b-instruct**: Performance results and metrics for the Llama 3.1 8B Instruct model.
 - **benchmarks/mistral-7b-v0.3**: Performance results for Mistral-7B-v0.3. Achieved 299.68 output tokens/sec with a 1.67% failure rate (1/60 requests). Survey run on 2026-05-01.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
@@ -44,6 +44,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Updated llama3-8b benchmark results with new high-performance run (1350.18 tokens/sec).
+- **2026-05-01**: Updated llama-3.1-70b benchmark results with new high-performance run (1510.63 tokens/sec).
 - **2026-05-01**: Archived new Mistral-7B-v0.3 benchmark results from latest survey. Updated catalog summary with new performance metrics (299.68 tokens/sec).
 - **2026-04-30**: Backlog of 40+ research and skill checkout requests cleared. Standardized cleanup and manifest locations communicated to workers.
 - **2026-04-30**: JetStream overlays for Llama-3-8B and Gemma-7B-it updated with GPU configuration (RTX 6000) and documentation corrected. *Note: Current 'cloud-tpu-images' lack CUDA support for JAX; benchmarking will fall back to CPU. vLLM is recommended for GPU environments until optimized images are available.*
