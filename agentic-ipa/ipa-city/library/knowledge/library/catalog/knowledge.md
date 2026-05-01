@@ -45,6 +45,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Conducted in-depth research into failed Gemma-7B-it (vLLM) run. Discovered discrepancy between archived log (port 8001, 14.8% error) and indexed results (port 8005, 100% failure). Noted high `token_count_mismatches` (100%) in successful Llama-3.1-8B-Instruct benchmark, suggesting potential tokenizer alignment issues.
 - **2026-05-01**: Processed skill check-in from `aipa_survey_packs.worker-2` for `k8s-deploy`. Received feedback to include full skill content in initial checkout confirmations.
 - **2026-05-01**: Performed library consistency audit. Moved stray `backup.jsonl` and `buckets.txt` from root to `archive/`. Relocated detailed AIPA `plan.md` to `library/knowledge/aipa/workflow/plan.md`.
 - **2026-05-01**: Fulfilled skill checkout request from `aipa_survey_packs.worker-3`. Provided the `k8s-deploy` skill for performing health checks on llama3-8b-jetstream.
