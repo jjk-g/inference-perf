@@ -46,6 +46,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Identified 100% failure rate in recent Gemma 4 VLLM benchmark attempt (`gemma4-vllm-report/`). Discovered potential issue with complex Kubernetes proxy `base_url` routing. Informed the benchmarking worker for further investigation.
 - **2026-05-01**: Updated Llama 3.1 and Gemma model knowledge files with optimal resource configurations (64Gi memory, 120s readiness timeout) and documented tokenizer alignment research findings. Library consistency audit passed.
 - **2026-05-01**: Updated `work/available` knowledge file to reflect that surveys for Gemma 4 (GPU), Llama 3 8B (JetStream), Gemma 7B-it (JetStream), and Llama 3 8B (JetStream GPU) are now IN PROGRESS.
 - **2026-05-01**: Fulfilled skill checkout request from `aipa_survey_packs__worker-ic-wbq`. Provided the `inference-perf` skill for benchmarking gemma4-vllm, including critical updates on port selection and URL formatting.
