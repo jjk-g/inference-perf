@@ -34,7 +34,9 @@
       "manifest-generation": "library/knowledge/aipa/manifest-generation/knowledge.md",
       "manifests": "library/knowledge/aipa/manifests.md",
       "run-survey": "library/knowledge/aipa/run-survey/knowledge.md",
-      "formulas": "library/knowledge/aipa/formulas/knowledge.md"    },
+      "formulas": "library/knowledge/aipa/formulas/knowledge.md",
+      "plan": "library/knowledge/aipa/workflow/plan.md"
+    },
     "models": {
       "gemma": "library/knowledge/models/gemma/knowledge.md",
       "llama3": "library/knowledge/models/llama3/knowledge.md",
