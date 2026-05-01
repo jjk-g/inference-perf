@@ -34,20 +34,23 @@ spec:
         app: gemma-7b-it-vllm-inference-server
         deployment: gemma-7b-it-vllm-deployment
     spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: g4-pool-1
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Equal"
+        value: "present"
+        effect: "NoSchedule"
       containers:
-      - args:
-        - --model=$(MODEL_ID)
-        - --device=cpu
-        - --disable-async-output-proc
-        command:
-        - python3
-        - -m
-        - vllm.entrypoints.openai.api_server
+      - command: ["/bin/sh", "-c"]
+        args:
+        - |
+          export VLLM_TARGET_DEVICE=cpu
+          export VLLM_DEVICE=cpu
+          python3 -m vllm.entrypoints.openai.api_server --model $(MODEL_ID) --device cpu --disable-async-output-proc --dtype half
         env:
         - name: MODEL_ID
           value: google/gemma-7b-it
-        - name: VLLM_TARGET_DEVICE
-          value: cpu
         - name: VLLM_LOGGING_LEVEL
           value: DEBUG
         - name: HUGGING_FACE_HUB_TOKEN
@@ -55,7 +58,7 @@ spec:
             secretKeyRef:
               key: hf_api_token
               name: hf-secret
-        image: vllm/vllm-openai:latest
+        image: vllm/vllm-openai:v0.6.3
         name: inference-server
         ports:
         - containerPort: 8000
@@ -68,11 +71,11 @@ spec:
           periodSeconds: 10
         resources:
           limits:
-            cpu: "8"
-            memory: 32Gi
+            cpu: "32"
+            memory: 128Gi
           requests:
-            cpu: "4"
-            memory: 16Gi
+            cpu: "16"
+            memory: 64Gi
         volumeMounts:
         - mountPath: /dev/shm
           name: dshm
