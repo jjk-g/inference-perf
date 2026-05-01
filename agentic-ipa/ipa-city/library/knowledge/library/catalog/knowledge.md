@@ -27,7 +27,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmarks/llama3-8b-gpu**: (Pending) Deployment configuration for JetStream on GPUs.
 - **benchmarks/llama3-70b**: Performance results for llama3-70b. Achieved 185.88 output tokens/sec with a 91.7% success rate (55/60 requests).
 - **benchmarks/llama-3.1-70b**: Performance results for Llama-3.1-70B. Achieved 1510.63 output tokens/sec with 0 failures (600/600 requests).
-- **benchmarks/llama-3-1-8b-instruct**: Performance results for Llama 3.1 8B Instruct. Achieved 1135.81 output tokens/sec with an 88.5% success rate (531/600 requests).
+- **benchmarks/llama-3-1-8b-instruct**: Performance results for Llama 3.1 8B Instruct. (Note: 2026-05-01 attempt failed due to pod termination; currently points to April 30th baseline of 1135.81 tokens/sec).
 - **benchmarks/mistral-7b-v0.3**: Performance results for Mistral-7B-v0.3. Achieved 299.68 output tokens/sec with a 1.67% failure rate (1/60 requests). Survey run on 2026-05-01.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
@@ -43,6 +43,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **library/catalog**: (This file) The index of all available skills and knowledge.
 
 ## Audit Status
+
+- **2026-05-01**: Archived failed benchmark results for Llama-3.1-8B-Instruct (100% failure rate). Results stored in `library/knowledge/benchmarks/llama-3-1-8b-instruct/failed-2026-05-01/`. Worker notified of `inference-perf` CLI corrections. Analysis indicates pod termination during startup.
 
 - **2026-05-01**: Performed library consistency audit. Verified that all indexed benchmarks exist and match the manifest inventory. Updated catalog with missing performance metrics for Gemma 2B, Gemma 7B-it, Llama 3 70B, and Llama 3.1 8B Instruct.
 - **2026-05-01**: Provided updated `inference-perf` skill to `worker-1` with detailed `pdm` commands, connectivity tips (avoiding port 8001), and pointed to baseline benchmark results for comparison.
