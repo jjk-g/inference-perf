@@ -28,7 +28,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmarks/llama3-70b**: Performance results and metrics for the llama3-70b model deployment.
 - **benchmarks/llama-3.1-70b**: Performance results for Llama-3.1-70B. Achieved 1314.44 output tokens/sec with 0 failures (600/600 requests).
 - **benchmarks/llama-3-1-8b-instruct**: Performance results and metrics for the Llama 3.1 8B Instruct model.
-- **benchmarks/mistral-7b-v0.3**: Performance results for Mistral-7B-v0.3. Achieved 1054 output tokens/sec with a 0% failure rate (verified after sentencepiece fix).
+- **benchmarks/mistral-7b-v0.3**: Performance results for Mistral-7B-v0.3. Achieved 299.68 output tokens/sec with a 1.67% failure rate (1/60 requests). Survey run on 2026-05-01.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
 - **aipa/manifests**: Inventory of available Kubernetes manifests for model servers.
@@ -44,6 +44,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Archived new Mistral-7B-v0.3 benchmark results from latest survey. Updated catalog summary with new performance metrics (299.68 tokens/sec).
 - **2026-04-30**: Backlog of 40+ research and skill checkout requests cleared. Standardized cleanup and manifest locations communicated to workers.
 - **2026-04-30**: JetStream overlays for Llama-3-8B and Gemma-7B-it updated with GPU configuration (RTX 6000) and documentation corrected. *Note: Current 'cloud-tpu-images' lack CUDA support for JAX; benchmarking will fall back to CPU. vLLM is recommended for GPU environments until optimized images are available.*
 - **2026-04-30**: Library consistency verified. All benchmarks (Gemma, Llama, Mistral) are indexed.
