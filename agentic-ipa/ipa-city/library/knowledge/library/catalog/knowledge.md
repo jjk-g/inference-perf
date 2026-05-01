@@ -48,6 +48,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Fulfilled research requests for `gemma-7b-it-vllm-cpu` manifest generation and vLLM `AttributeError` fix (using `--cpu-kv-cache-space`). Granted `model-serving` skill to workers `ic-75tr` and `ic-ccpe`. Addressed feedback regarding confusing bucket names in JetStream overlays. Verified that no unread requests remain in the inbox.
 - **2026-05-01**: Performed library consistency audit: all indexed files are present. Archived 'gemini_debug.log' from the root directory to 'archive/'. Verified that no unread research or skill checkout requests remain in the inbox.
 - **2026-05-01**: Performed library consistency audit: all indexed files are present. Archived 'gemini_debug.log' from the root directory to 'archive/'. Verified that no unread research or skill checkout requests remain in the inbox.
 - **2026-05-01**: Performed library consistency audit: all indexed files are present. Archived 'gemini_debug.log' from the root directory to 'archive/'. Merged duplicate Librarian status messages in the bead store. Verified that all skill files are synchronized and no unread research requests remain.
