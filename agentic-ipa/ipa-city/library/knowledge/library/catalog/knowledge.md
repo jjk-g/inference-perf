@@ -23,7 +23,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 - **benchmarks/gemma-7b-it**: Performance results for gemma-7b-it. Benchmark failed with 0% success rate (0/60 requests).
 - **benchmarks/gemma-2b**: Performance results for gemma-2b. Achieved 4592.15 output tokens/sec with a 94.0% success rate (564/600 requests).
-- **benchmarks/gemma4-vllm**: Performance results for gemma4-vllm. Achieved 6294.37 total tokens/sec with a 95.2% success rate (571/600 requests).
+- **benchmarks/gemma4-vllm**: Performance results for gemma4-vllm. Achieved 100% success rate (150/150 requests) in latest run. Baseline high-load run achieved 1286.38 output tokens/sec.
 - **benchmarks/llama3-8b**: Performance results for llama3-8b. Achieved 1350.18 output tokens/sec with 0 failures (600/600 requests). Survey run on 2026-05-01.
 - **benchmarks/llama3-8b-gpu**: (Pending) Deployment configuration for JetStream on GPUs.
 - **benchmarks/llama3-70b**: Performance results for llama3-70b. Achieved 185.88 output tokens/sec with a 91.7% success rate (55/60 requests).
@@ -46,6 +46,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Archived and indexed successful Gemma 4 VLLM benchmark results (100% success rate). Updated model knowledge with both latest and baseline high-load metrics.
 - **2026-05-01**: Identified 100% failure rate in recent Gemma 4 VLLM benchmark attempt (`gemma4-vllm-report/`). Discovered potential issue with complex Kubernetes proxy `base_url` routing. Informed the benchmarking worker for further investigation.
 - **2026-05-01**: Updated Llama 3.1 and Gemma model knowledge files with optimal resource configurations (64Gi memory, 120s readiness timeout) and documented tokenizer alignment research findings. Library consistency audit passed.
 - **2026-05-01**: Updated `work/available` knowledge file to reflect that surveys for Gemma 4 (GPU), Llama 3 8B (JetStream), Gemma 7B-it (JetStream), and Llama 3 8B (JetStream GPU) are now IN PROGRESS.

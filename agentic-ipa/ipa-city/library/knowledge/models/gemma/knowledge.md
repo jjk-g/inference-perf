@@ -7,9 +7,13 @@ The `gemma4-vllm` configuration is used for deploying the Gemma 4 model using th
 - **Model ID**: `google/gemma-2b` (Note: Currently points to gemma-2b in manifest)
 - **Deployment Name**: `gemma4-vllm-vllm-deployment`
 - **Service Name**: `gemma4-vllm-vllm-service`
-- **Status**: Benchmark Complete (Stable Run) / Latest Attempt Failed
-- **Research Note**: A recent benchmark attempt for `gemma4-vllm` (2026-05-01) resulted in a 100% failure rate (150/150 requests). Discrepancy suspected in the complex Kubernetes proxy `base_url` routing. Workers are advised to verify proxy stability or use direct service IPs if possible.
-- **Metrics (Stable Run)**:
+- **Status**: Benchmark Complete (100% Success Rate)
+- **Metrics (Latest)**:
+  - Request Latency (Mean): 8.53s
+  - Time to First Token (Mean): 8.02s
+  - Throughput (Output Tokens/sec): 359.00
+  - Success Rate: 100% (150/150 requests)
+- **Metrics (Baseline - High Load)**:
   - Request Latency (Mean): 0.85s
   - Time to First Token (Mean): 0.12s
   - Throughput (Output Tokens/sec): 1286.38
