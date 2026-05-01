@@ -23,8 +23,7 @@ This document tracks the available Kubernetes deployment manifests in the Gas Ci
 
 ## Legacy or Test Manifests
 
-- `library/knowledge/manifests/generated-llama3-8b-manifest.yaml` (Redundant?)
-- `test.yaml`
+- None.
 
 ## Naming Convention
 

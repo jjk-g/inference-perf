@@ -44,6 +44,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Performed library consistency audit. Cleaned up temporary `port-forward-*.log` files and stray benchmark configs from the root directory. Updated manifest inventory in `library/knowledge/aipa/manifests.md` to remove non-existent legacy entries.
 - **2026-05-01**: Updated `generate_manifest` skill based on worker feedback to clarify navigation into environment-specific subdirectories (e.g., `gke/`).
 - **2026-05-01**: Standardized manifest filenames in `library/knowledge/manifests/` to follow the `generated-<server>-<model>.yaml` convention. Updated references in the library catalog and model knowledge files. Redundant manifests removed.
 - **2026-05-01**: Updated `archive_results` skill with explicit instructions for cleaning up temporary `port-forward-*.log` files from the root directory.
