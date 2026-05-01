@@ -31,6 +31,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmarks/llama-3-1-8b-instruct**: Performance results for Llama 3.1 8B Instruct. Achieved a new record of 2035.01 output tokens/sec with a 93% success rate (558/600 requests). Survey run on 2026-05-01.
 - **benchmarks/mistral-7b-v0.3**: Performance results for Mistral-7B-v0.3. Achieved 299.68 output tokens/sec with a 1.67% failure rate (1/60 requests). Survey run on 2026-05-01.
 - **benchmarks/gemma4-gpu**: Performance results for Gemma 4 on GPU. Achieved 143.24 output tokens/sec with a 98.3% success rate (59/60 requests). Survey run on 2026-05-01.
+- **benchmarks/gemma-7b-it-vllm-cpu**: Performance results for gemma-7b-it-vllm-cpu. Benchmark failed with 0% success rate (0/30 requests). Survey run on 2026-05-01.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
 - **aipa/manifests**: Inventory of available Kubernetes manifests for model servers.

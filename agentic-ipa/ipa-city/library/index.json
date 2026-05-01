@@ -28,7 +28,8 @@
       "llama-3-1-8b-instruct": "library/knowledge/benchmarks/llama-3-1-8b-instruct/summary_lifecycle_metrics.json",
       "llama-3.1-70b": "library/knowledge/benchmarks/llama-3.1-70b/summary_lifecycle_metrics.json",
       "mistral-7b-v0.3": "library/knowledge/benchmarks/mistral-7b-v0.3/summary_lifecycle_metrics.json",
-      "gemma4-gpu": "library/knowledge/benchmarks/gemma4-gpu/summary_lifecycle_metrics.json"
+      "gemma4-gpu": "library/knowledge/benchmarks/gemma4-gpu/summary_lifecycle_metrics.json",
+      "gemma-7b-it-vllm-cpu": "library/knowledge/benchmarks/gemma-7b-it-vllm-cpu/summary_lifecycle_metrics.json"
     },
     "aipa": {
       "workflow": "library/knowledge/aipa/workflow/knowledge.md",
