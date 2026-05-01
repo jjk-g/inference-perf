@@ -55,8 +55,6 @@ spec:
         env:
         - name: TENSOR_PARALLEL_SIZE
           value: "1"
-        - name: JAX_PLATFORMS
-          value: "cpu"
         image: us-docker.pkg.dev/cloud-tpu-images/inference/jetstream-pytorch-server:v0.2.3
         name: inference-server
         ports:
@@ -107,6 +105,7 @@ spec:
         - -n=llama-3
         - -q=False
         - -h=True
+        env: []
         image: us-docker.pkg.dev/cloud-tpu-images/inference/inference-checkpoint:v0.2.3
         name: inference-checkpoint
         resources:
