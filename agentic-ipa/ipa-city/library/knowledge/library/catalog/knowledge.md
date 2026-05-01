@@ -30,6 +30,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **benchmarks/llama-3.1-70b**: Performance results for Llama-3.1-70B. Achieved 1510.63 output tokens/sec with 0 failures (600/600 requests).
 - **benchmarks/llama-3-1-8b-instruct**: Performance results for Llama 3.1 8B Instruct. Achieved a new record of 2035.01 output tokens/sec with a 93% success rate (558/600 requests). Survey run on 2026-05-01.
 - **benchmarks/mistral-7b-v0.3**: Performance results for Mistral-7B-v0.3. Achieved 299.68 output tokens/sec with a 1.67% failure rate (1/60 requests). Survey run on 2026-05-01.
+- **benchmarks/gemma4-gpu**: Performance results for Gemma 4 on GPU. Achieved 143.24 output tokens/sec with a 98.3% success rate (59/60 requests). Survey run on 2026-05-01.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
 - **aipa/manifests**: Inventory of available Kubernetes manifests for model servers.
@@ -46,6 +47,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Updated `k8s-deploy` skill based on feedback from `worker-2` and `worker-3`. Added a proactive secret verification step (`kubectl get secret hf-secret`) to the 'Apply Manifest' process and clarified that the `kubectl proxy` method is recommended for reliable health checks. Synchronized updates across all library skill files and the active skill pack.
 - **2026-05-01**: Verified and synchronized 'k8s-deploy' skill files ('apply_manifest_v1.md', 'wait_healthy_v1.md', 'cleanup_resources_v1.md') to ensure they consistently include the latest troubleshooting notes for JetStream-on-GPU and gated models. Fulfilled skill checkout requests from 'aipa_survey_packs__worker-ic-7w1', 'aipa_survey_packs.worker-2', and 'aipa_survey_packs.worker-3'.
 - **2026-05-01**: Fulfilled research requests from 'aipa_survey_packs.worker-2' and 'aipa_survey_packs.worker-3' for the 'gemma4-gpu' vLLM manifest ('library/knowledge/manifests/generated-vllm-gemma4-gpu.yaml').
 - **2026-05-01**: Performed library consistency audit and root directory cleanup. Moved stray utility scripts (`process_mail.py`, `fix_archive.py`, `jetstream_proxy.py`) to `archive/`. Verified that all indexed skills and knowledge domains are present and consistent with the manifest inventory.

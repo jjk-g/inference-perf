@@ -16,11 +16,15 @@ This process describes how to deploy a model server using a generated Kubernetes
 
 ### Process
 1. **Locate the manifest file**: Ensure the manifest for the model is available in the current directory or specified path.
-2. **Apply the manifest**:
+2. **Verify Secrets**: For gated models (e.g., Llama 3, Gemma), ensure the `hf-secret` exists in the namespace:
+   ```bash
+   kubectl get secret hf-secret
+   ```
+3. **Apply the manifest**:
    ```bash
    kubectl apply -f <manifest-path>
    ```
-3. **Verify Submission**:
+4. **Verify Submission**:
    The command should output `service/<name> created` and `deployment/<name> created`.
 
 ### Troubleshooting: `kubectl apply` Failures
@@ -47,6 +51,7 @@ This process describes how to wait for a deployed model server to be healthy and
 
 2. **Check health endpoint**:
    Use `curl` or a similar tool to check the `/health` or `/v1/models` endpoint of the service.
+   Checking via the `kubectl proxy` method is recommended for reliability.
 
    Example:
    ```bash
