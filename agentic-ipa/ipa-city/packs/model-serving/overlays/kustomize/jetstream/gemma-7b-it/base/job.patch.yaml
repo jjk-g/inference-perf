@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+apiVersion: batch/v1
 kind: Job
 metadata:
   name: gemma-7b-it-jetstream-data-loader
@@ -12,6 +12,7 @@ spec:
     spec:
       containers:
       - name: inference-checkpoint
+        env: []
         args:
         - -b=llama3-8b-jetstream
         - -m=google/gemma/maxtext/7b-it/2

@@ -12,6 +12,7 @@ spec:
       containers:
       - name: inference-checkpoint
         image: us-docker.pkg.dev/cloud-tpu-images/inference/inference-checkpoint:v0.2.2
+        env: []
         volumeMounts:
         - mountPath: "/kaggle/"
           name: kaggle-credentials

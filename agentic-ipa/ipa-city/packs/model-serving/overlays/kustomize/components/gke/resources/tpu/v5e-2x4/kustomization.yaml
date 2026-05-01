@@ -5,14 +5,37 @@ kind: Component
 patches:
   - path: v5e-2x4.yaml
     target:
-      group: apps
-      version: v1
       kind: Deployment
+  - path: v5e-2x4.yaml
+    target:
+      kind: Job
   - patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/env/-
-        value:
-          name: TENSOR_PARALLEL_SIZE
-          value: "8"
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: "*"
+      spec:
+        template:
+          spec:
+            containers:
+            - name: inference-server
+              env:
+              - name: TENSOR_PARALLEL_SIZE
+                value: "8"
     target:
       kind: Deployment
+  - patch: |-
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: "*"
+      spec:
+        template:
+          spec:
+            containers:
+            - name: inference-checkpoint
+              env:
+              - name: TENSOR_PARALLEL_SIZE
+                value: "8"
+    target:
+      kind: Job

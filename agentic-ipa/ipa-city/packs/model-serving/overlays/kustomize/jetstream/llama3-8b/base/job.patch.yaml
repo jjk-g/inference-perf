@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+apiVersion: batch/v1
 kind: Job
 metadata:
   name: llama3-8b-jetstream-data-loader
@@ -13,6 +13,7 @@ spec:
       containers:
       - name: inference-checkpoint
         image: us-docker.pkg.dev/cloud-tpu-images/inference/inference-checkpoint:v0.2.3
+        env: []
         args:
         - -s=jetstream-pytorch
         - -m=meta-llama/Meta-Llama-3-8B

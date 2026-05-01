@@ -92,6 +92,7 @@ spec:
       - args:
         - -b=llama3-8b-jetstream
         - -m=google/gemma/maxtext/7b-it/2
+        env: []
         image: us-docker.pkg.dev/cloud-tpu-images/inference/inference-checkpoint:v0.2.2
         name: inference-checkpoint
         resources:

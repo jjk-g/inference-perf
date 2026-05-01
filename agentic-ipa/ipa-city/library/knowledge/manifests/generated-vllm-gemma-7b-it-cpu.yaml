@@ -38,6 +38,8 @@ spec:
       - args:
         - --model=$(MODEL_ID)
         - --device=cpu
+        - --disable-async-output-proc
+        - --enforce-eager
         command:
         - python3
         - -m
