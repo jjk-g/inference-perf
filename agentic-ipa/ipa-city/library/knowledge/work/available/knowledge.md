@@ -5,7 +5,7 @@ This document summarizes the current status of work available for Worker agents 
 ## Current Backlog Status
 
 As of today, the ready work items include:
-- **New Survey Opportunities**: Identified ready manifests for Gemma 4 (GPU), Llama 3 8B (JetStream), Gemma 7B-it (JetStream), and Llama 3 8B (JetStream GPU).
+- **Active Surveys**: Surveys are IN PROGRESS for Gemma 4 (GPU), Llama 3 8B (JetStream), Gemma 7B-it (JetStream), and Llama 3 8B (JetStream GPU).
 - **Re-Survey Opportunity**: Gemma 7B-it (vLLM) previously failed (0% success) and needs investigation/re-run.
 - **Verification**: Library consistency audit and Mistral-7B-v0.3 survey archival complete (2026-05-01).
 
@@ -26,14 +26,15 @@ As of today, the ready work items include:
 
 Status of active pipelines:
 1.  **Gemma-2B**: Completed and archived.
-2.  **Llama3-8B**: vLLM completed. JetStream ready for survey.
+2.  **Llama3-8B**: vLLM completed. JetStream survey IN PROGRESS.
 3.  **Llama3-70B**: Completed and archived.
-4.  **Gemma4-VLLM**: vLLM completed. vLLM (GPU) ready for survey.
-5.  **Gemma-7B-it**: vLLM failed (0% success). JetStream ready for survey.
+4.  **Gemma4-VLLM**: vLLM completed. GPU survey IN PROGRESS.
+5.  **Gemma-7B-it**: vLLM failed (0% success). JetStream survey IN PROGRESS.
 6.  **Llama-3.1-8B-Instruct**: Completed and archived.
 7.  **Mistral-7B-v0.3**: Completed and archived.
 8.  **Llama-3.1-70B**: Completed and archived.
-9.  **Mayor Status**: The Mayor (ic-diz2) is active and overseeing city operations.
+9.  **Llama3-8B-GPU**: JetStream survey IN PROGRESS.
+10. **Mayor Status**: The Mayor (ic-diz2) is active and overseeing city operations.
 
 ## Formulas and Structured Workflows
 
