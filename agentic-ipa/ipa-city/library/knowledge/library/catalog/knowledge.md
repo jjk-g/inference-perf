@@ -45,6 +45,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Performed library consistency audit and root directory cleanup. Removed stray `benchmark_config.yaml` (archived to `archive/`) and deleted old log files from April. Verified that all indexed benchmarks exist and are consistent.
+- **2026-05-01**: Fulfilled skill checkout request from `worker-ic-wbq`. Provided the `k8s-deploy` skill covering manifest application, health checks, and resource cleanup.
 - **2026-05-01**: Created a dedicated `cleanup_resources` skill and updated the library catalog. Added the new cleanup protocol to the `k8s-deploy` packed skill based on worker feedback.
 - **2026-05-01**: Successfully resolved llama-3.1-8b-instruct survey failure. Identified and increased insufficient 32Gi memory limit to 64Gi, relaxed readiness probes, and corrected benchmark base_url. Re-benchmark achieved a new record of 2035.01 output tokens/sec (up from 1135.81 baseline).
 - **2026-05-01**: Archived failed benchmark results for Llama-3.1-8B-Instruct (100% failure rate) in `failed-2026-05-01/` for post-mortem analysis. Updated main index with successful re-run results.
