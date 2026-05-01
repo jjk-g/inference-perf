@@ -1,0 +1,27 @@
+server:
+  type: vllm
+  base_url: http://localhost:8008
+  model_name: google/gemma-2b
+api:
+  type: completion
+  streaming: true
+data:
+  type: random
+  input_distribution:
+    min: 128
+    max: 512
+    mean: 320.0
+    type: uniform
+  output_distribution:
+    min: 16
+    max: 128
+    mean: 72.0
+    type: uniform
+load:
+  type: constant
+  stages:
+  - rate: 2.0
+    duration: 30
+storage:
+  local_storage:
+    path: gemma4-gpu-report
