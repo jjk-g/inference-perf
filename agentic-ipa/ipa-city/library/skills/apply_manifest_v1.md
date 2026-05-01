@@ -23,6 +23,13 @@ This process describes how to deploy a model server using a generated Kubernetes
 3. **Verify Submission**:
    The command should output `service/<name> created` and `deployment/<name> created`.
 
+### Troubleshooting: `kubectl apply` Failures
+If the command fails, check for the following common issues:
+- **Unauthorized/Forbidden**: Ensure you have the correct context and permissions for the target namespace.
+- **Invalid YAML**: Verify that the manifest file was not corrupted during generation or transfer. Run `kubectl apply --dry-run=client -f <manifest-path>` to check for syntax errors.
+- **Connection Refused**: Ensure the cluster is reachable and your `kubeconfig` is properly configured.
+- **Resource Conflict**: If a resource already exists and cannot be patched, you may need to delete it first using `kubectl delete -f <manifest-path>` before re-applying.
+
 ## Wait Healthy
 This process describes how to wait for a deployed model server to be healthy and ready.
 

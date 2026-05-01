@@ -1,0 +1,29 @@
+
+server:
+  type: vllm
+  base_url: http://localhost:8003
+  model_name: llama-3
+api:
+  type: completion
+  streaming: false
+data:
+  type: random
+  input_distribution:
+    min: 128
+    max: 1024
+    mean: 512
+    type: uniform
+  output_distribution:
+    min: 16
+    max: 256
+    mean: 128
+    type: uniform
+load:
+  type: constant
+  stages:
+  - rate: 1
+    duration: 10
+storage:
+  local_storage:
+    path: ./results
+tokenizer: null

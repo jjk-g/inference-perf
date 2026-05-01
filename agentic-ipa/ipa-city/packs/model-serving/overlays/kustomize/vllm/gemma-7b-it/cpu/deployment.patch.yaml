@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '*'
+spec:
+  template:
+    metadata:
+      labels:
+        ai.gke.io/model: gemma-7b-it
+        ai.gke.io/inference-server: vllm
+    spec:
+      containers:
+      - name: inference-server
+        args:
+        - --model=$(MODEL_ID)
+        - --device=cpu
+        resources:
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+          limits:
+            cpu: "8"
+            memory: "32Gi"
+        readinessProbe:
+          failureThreshold: 120
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10

@@ -2,37 +2,37 @@ apiVersion: v1
 kind: Service
 metadata:
   labels:
-    app: llama3-8b-vllm-cpu-inference-server
-  name: llama3-8b-vllm-cpu-service
+    app: llama3-8b-vllm-inference-server
+  name: llama3-8b-vllm-service-cpu
 spec:
   ports:
   - port: 8000
     protocol: TCP
     targetPort: 8000
   selector:
-    app: llama3-8b-vllm-cpu-inference-server
-    deployment: llama3-8b-vllm-cpu-deployment
+    app: llama3-8b-vllm-inference-server
+    deployment: llama3-8b-vllm-deployment
   type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    app: llama3-8b-vllm-cpu-inference-server
-  name: llama3-8b-vllm-cpu-deployment
+    app: llama3-8b-vllm-inference-server
+  name: llama3-8b-vllm-deployment-cpu
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: llama3-8b-vllm-cpu-inference-server
-      deployment: llama3-8b-vllm-cpu-deployment
+      app: llama3-8b-vllm-inference-server
+      deployment: llama3-8b-vllm-deployment
   template:
     metadata:
       labels:
         ai.gke.io/inference-server: vllm
         ai.gke.io/model: llama3-8b
-        app: llama3-8b-vllm-cpu-inference-server
-        deployment: llama3-8b-vllm-cpu-deployment
+        app: llama3-8b-vllm-inference-server
+        deployment: llama3-8b-vllm-deployment
     spec:
       containers:
       - args:
@@ -68,3 +68,10 @@ spec:
           requests:
             cpu: "4"
             memory: 16Gi
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+      volumes:
+      - emptyDir:
+          medium: Memory
+        name: dshm

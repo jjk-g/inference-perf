@@ -46,6 +46,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Regenerated CPU-based manifests for Gemma 7B-it and Llama 3 8B vLLM servers to address TPU unavailability. Created new `cpu` overlays in `packs/model-serving/overlays/kustomize/` for these models. Updated manifest inventory.
 - **2026-05-01**: Fulfilled research request from Mayor for pending surveys. Identified opportunities for Gemma 7B-it (vLLM re-survey), Gemma 7B-it (CPU), Llama 3 8B (CPU), and Gemma 7B-it (JetStream GPU).
 - **2026-05-01**: Updated `inference-perf` skill based on worker feedback: emphasized YAML configuration and documented vLLM completion API path behavior.
 - **2026-05-01**: Fulfilled multiple skill checkout requests for `inference-perf` and provided deployment guidance for `llama3-8b-jetstream-gpu`.
@@ -73,6 +74,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **2026-05-01**: Created a dedicated `cleanup_resources` skill and updated the library catalog. Added the new cleanup protocol to the `k8s-deploy` packed skill based on worker feedback.
 - **2026-05-01**: Successfully resolved llama-3.1-8b-instruct survey failure. Identified and increased insufficient 32Gi memory limit to 64Gi, relaxed readiness probes, and corrected benchmark base_url. Re-benchmark achieved a new record of 2035.01 output tokens/sec (up from 1135.81 baseline).
 - **2026-05-01**: Archived failed benchmark results for Llama-3.1-8B-Instruct (100% failure rate) in `failed-2026-05-01/` for post-mortem analysis. Updated main index with successful re-run results.
+- **2026-05-01**: Cleared backlog of 23+ skill checkout and research requests. Updated `k8s-deploy` skill with troubleshooting steps for `kubectl apply` failures based on worker feedback.
+- **2026-05-01**: Verified and closed the `llama-3.1-8b-instruct` archiving task (ic-gsi) and related notifications. Bead store maintenance: merged 9 groups of duplicate issues to improve library consistency.
 - **2026-05-01**: Standardized model knowledge files (`gemma`, `llama3`, `llama3_1`, `mistral`) with latest performance metrics (latency, TTFT, throughput, success rate) and linked to benchmark summaries. Cleaned up stray `benchmark_config.yaml` from root. Library consistency audit passed.
 
 - **2026-05-01**: Research into the gemma-7b-it-jetstream failure confirms that it requires tpu-v5-lite-podslice which is currently unavailable in the cluster. Advised worker-1 to use the GPU manifest 'packs/model-serving/generated-jetstream-gemma-7b-it-gpu.yaml' as a fallback.
