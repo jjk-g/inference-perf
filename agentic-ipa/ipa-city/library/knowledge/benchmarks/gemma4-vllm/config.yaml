@@ -38,7 +38,7 @@ load:
   circuit_breakers: []
   request_timeout: null
   lora_traffic_split: null
-  base_seed: 1777600410869
+  base_seed: 1777600748142
 metrics: null
 report:
   request_lifecycle:
@@ -64,14 +64,14 @@ report:
     per_stage: false
 storage:
   local_storage:
-    path: gemma4-vllm-report
+    path: my-gemma4-report
     report_file_prefix: null
   google_cloud_storage: null
   simple_storage_service: null
 server:
   type: vllm
   model_name: google/gemma-2b
-  base_url: http://localhost:18000/api/v1/namespaces/default/services/gemma4-vllm-vllm-service:8000/proxy
+  base_url: http://localhost:18010/api/v1/namespaces/default/services/gemma4-vllm-vllm-service:8000/proxy
   ignore_eos: true
   api_key: null
   cert_path: null

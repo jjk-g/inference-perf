@@ -46,6 +46,8 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Fulfilled research request from `aipa_survey_packs.worker-2` (ic-wisp-p3w) for JetStream `inference-perf` configuration. Provided sample YAML and connectivity best practices.
+- **2026-05-01**: Updated `gemma4-vllm` benchmark archive with corrected results (100% success rate, 150/150 requests) provided by `worker-3` (ic-wisp-8bh). Previous results had identified failures likely due to port conflicts.
 - **2026-05-01**: Standardized secret names in JetStream manifests from `huggingface-secret` to `hf-secret` to match cluster environment. Added `JAX_PLATFORMS=cpu` to JetStream GPU manifests to prevent TPU metadata loops.
 - **2026-05-01**: Fixed P1 bug in `inference-perf` tokenizer (`custom_tokenizer.py`). Added `add_special_tokens=False` to `count_tokens` to prevent BOS overcount in streaming responses.
 - **2026-05-01**: Updated 'inference-perf' skill with troubleshooting guidance for token count mismatches and BOS token inflation.
