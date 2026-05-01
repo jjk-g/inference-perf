@@ -5,9 +5,9 @@ This document summarizes the current status of work available for Worker agents 
 ## Current Backlog Status
 
 As of today, the ready work items include:
-- **Active Surveys**: Surveys are IN PROGRESS for Llama 3 8B (JetStream), Gemma 7B-it (JetStream), and Llama 3 8B (JetStream GPU).
+- **Active Surveys**: Surveys are IN PROGRESS for Llama 3 8B (JetStream), Gemma 7B-it (JetStream), and Llama 3 8B (JetStream GPU). Note that Llama 3 8B JetStream (TPU) is currently failing due to node unavailability; workers should use the GPU fallback manifest (`generated-jetstream-llama3-8b-gpu.yaml`) which has been synchronized to the `model-serving` pack.
 - **CPU Fallback Surveys**: CPU-based manifests are READY for Gemma 7B-it (`generated-vllm-gemma-7b-it-cpu.yaml`) and Llama 3 8B (`generated-vllm-llama3-8b-cpu.yaml`). These should be used to address TPU unavailability.
-- **Re-Survey Opportunity**: Gemma 7B-it (vLLM) previously failed (0% success) and needs investigation/re-run.
+- **Re-Survey Opportunity**: Gemma 7B-it (vLLM) re-survey is IN PROGRESS on CPU (ic-mol-81gd).
 - **Verification**: Library consistency audit and Mistral-7B-v0.3 survey archival complete (2026-05-01).
 
 ### Completed Tasks
@@ -20,7 +20,7 @@ As of today, the ready work items include:
 - **llama3-70b deployment & benchmark**: Completed and archived.
 - **gemma4-vllm deployment & benchmark**: Completed and archived.
 - **gemma4-gpu deployment & benchmark**: Completed and archived.
-- **gemma-7b-it deployment & benchmark**: vLLM run failed (0% success). Ready for re-survey.
+- **gemma-7b-it deployment & benchmark**: vLLM TPU run failed (0% success). CPU re-survey IN PROGRESS.
 - **llama-3.1-8b-instruct deployment & benchmark**: Completed and archived.
 - **llama-3.1-70b deployment & benchmark**: Updated with new record (1510.63 tokens/sec).
 
@@ -31,7 +31,7 @@ Status of active pipelines:
 2.  **Llama3-8B**: vLLM completed. JetStream survey IN PROGRESS.
 3.  **Llama3-70B**: Completed and archived.
 4.  **Gemma4-VLLM**: vLLM and GPU surveys completed and archived.
-5.  **Gemma-7B-it**: vLLM failed (0% success). JetStream survey IN PROGRESS.
+5.  **Gemma-7B-it**: vLLM TPU failed. CPU re-survey IN PROGRESS. JetStream survey IN PROGRESS.
 6.  **Llama-3.1-8B-Instruct**: Completed and archived.
 7.  **Mistral-7B-v0.3**: Completed and archived.
 8.  **Llama-3.1-70B**: Completed and archived.
