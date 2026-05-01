@@ -7,6 +7,7 @@
     "generate_manifest": "library/skills/generate_manifest_v1.md",
     "inference-perf": "library/skills/inference-perf_v1.md",
     "wait_healthy": "library/skills/wait_healthy_v1.md",
+    "cleanup_resources": "library/skills/cleanup_resources_v1.md",
     "core.gc-work": "library/skills/core.gc-work_v1.md",
     "dolt-backup": "library/skills/dolt-backup_v1.md",
     "dog-doctor-skill": "library/skills/dog-doctor-skill_v1.md",

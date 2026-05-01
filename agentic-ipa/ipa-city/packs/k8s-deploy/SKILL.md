@@ -48,3 +48,29 @@ This process describes how to wait for a deployed model server to be healthy and
    curl http://localhost:8001/api/v1/namespaces/default/services/<service-name>:8000/proxy/health
    kill $PID
    ```
+
+## Cleanup Resources
+This process describes how to remove the model server resources from the Kubernetes cluster.
+
+### Prerequisites
+- The manifest file used for deployment (e.g., `generated-llama3-8b-manifest.yaml`).
+- `kubectl` configured with access to the cluster.
+
+### Process
+1. **Delete using manifest**:
+   If the manifest file is available, use it to delete all associated resources:
+   ```bash
+   kubectl delete -f <manifest-path>
+   ```
+2. **Manual Deletion** (if manifest is unavailable):
+   If the manifest is not available, delete the deployment and service by name:
+   ```bash
+   kubectl delete deployment <deployment-name>
+   kubectl delete service <service-name>
+   ```
+3. **Verify Deletion**:
+   Ensure the resources are no longer listed:
+   ```bash
+   kubectl get deployment <deployment-name>
+   kubectl get service <service-name>
+   ```

@@ -16,6 +16,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 - **phantom-db-scan-skill**: Detecting and quarantining phantom Dolt databases.
 - **stale-db-scan-skill**: Detecting and cleaning up stale or orphaned test databases.
 - **wait_healthy**: How to wait for a deployed model server to be healthy and ready.
+- **cleanup_resources**: How to remove model server resources from the Kubernetes cluster after a task is complete.
 - **archive_results**: How to archive and index benchmark results in the Gas City Library.
 
 ## Knowledge Domains
@@ -44,6 +45,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Created a dedicated `cleanup_resources` skill and updated the library catalog. Added the new cleanup protocol to the `k8s-deploy` packed skill based on worker feedback.
 - **2026-05-01**: Successfully resolved llama-3.1-8b-instruct survey failure. Identified and increased insufficient 32Gi memory limit to 64Gi, relaxed readiness probes, and corrected benchmark base_url. Re-benchmark achieved a new record of 2035.01 output tokens/sec (up from 1135.81 baseline).
 - **2026-05-01**: Archived failed benchmark results for Llama-3.1-8B-Instruct (100% failure rate) in `failed-2026-05-01/` for post-mortem analysis. Updated main index with successful re-run results.
 - **2026-05-01**: Standardized model knowledge files (`gemma`, `llama3`, `llama3_1`, `mistral`) with latest performance metrics (latency, TTFT, throughput, success rate) and linked to benchmark summaries. Cleaned up stray `benchmark_config.yaml` from root. Library consistency audit passed.
