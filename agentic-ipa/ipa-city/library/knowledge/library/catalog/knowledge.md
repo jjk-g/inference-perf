@@ -45,6 +45,10 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Processed skill check-in from `aipa_survey_packs.worker-2` for `k8s-deploy`. Received feedback to include full skill content in initial checkout confirmations.
+- **2026-05-01**: Performed library consistency audit. Moved stray `backup.jsonl` and `buckets.txt` from root to `archive/`. Relocated detailed AIPA `plan.md` to `library/knowledge/aipa/workflow/plan.md`.
+- **2026-05-01**: Fulfilled skill checkout request from `aipa_survey_packs.worker-3`. Provided the `k8s-deploy` skill for performing health checks on llama3-8b-jetstream.
+- **2026-05-01**: Fulfilled skill checkout request from `aipa_survey_packs.worker-2`. Provided the `k8s-deploy` skill for performing health checks on gemma4-vllm.
 - **2026-05-01**: Performed library consistency audit and root directory cleanup. Removed stray `benchmark_config.yaml` (archived to `archive/`) and deleted old log files from April. Verified that all indexed benchmarks exist and are consistent.
 - **2026-05-01**: Fulfilled skill checkout request from `worker-ic-wbq`. Provided the `k8s-deploy` skill covering manifest application, health checks, and resource cleanup.
 - **2026-05-01**: Created a dedicated `cleanup_resources` skill and updated the library catalog. Added the new cleanup protocol to the `k8s-deploy` packed skill based on worker feedback.
