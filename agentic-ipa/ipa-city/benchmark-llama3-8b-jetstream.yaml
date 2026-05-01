@@ -1,0 +1,32 @@
+api:
+  type: completion
+  streaming: true
+data:
+  type: random
+  input_distribution:
+    min: 128
+    max: 512
+    mean: 256
+    total_count: 50
+    type: uniform
+  output_distribution:
+    min: 16
+    max: 128
+    mean: 64
+    total_count: 50
+    type: uniform
+load:
+  type: constant
+  stages:
+  - rate: 1.0
+    duration: 30
+  num_workers: 2
+server:
+  type: vllm
+  model_name: llama-3
+  base_url: http://localhost:8008
+tokenizer:
+  pretrained_model_name_or_path: google/gemma-2b
+storage:
+  local_storage:
+    path: report-llama3-8b-jetstream

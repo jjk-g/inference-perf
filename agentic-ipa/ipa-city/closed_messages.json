@@ -1,0 +1,1503 @@
+[
+  {
+    "id": "ic-wisp-uif",
+    "title": "Skill: k8s-deploy",
+    "description": "# Apply Manifest Skill\n\nThis skill describes how to deploy a model server using a generated Kubernetes manifest.\n\n## Prerequisites\n- A generated manifest file (e.g., `generated-vllm-llama3-8b.yaml`).\n- `kubectl` configured with access to the cluster.\n\n## Process\n1. **Locate the manifest file**: Ensure the manifest for the model is available in the current directory or specified path (typically `library/knowledge/manifests/`).\n2. **Apply the manifest**:\n   ```bash\n   kubectl apply -f \u003cmanifest-path\u003e\n   ```\n   Example:\n   ```bash\n   kubectl apply -f library/knowledge/manifests/generated-vllm-llama3-8b.yaml\n   ```\n3. **Verify Submission**:\n   The command should output `service/\u003cname\u003e created` and `deployment/\u003cname\u003e created`.\n\n## Cleanup\nTo remove a deployed model server and free up resources, use the `kubectl delete` command with the same manifest file. **Crucial**: Always delete the old deployment before applying a new one for the same model to ensure a clean state.\n\n```bash\nkubectl delete -f \u003cmanifest-path\u003e\n```\nExample:\n```bash\nkubectl delete -f library/knowledge/manifests/generated-vllm-llama3-8b.yaml\n```\nThis will remove the deployment, service, and any other resources defined in the manifest.\n\n# Wait Healthy Skill\n\nThis skill describes how to wait for a deployed model server to be healthy and ready.\n\n## Prerequisites\n- `kubectl` configured.\n- The name of the deployment or service to check.\n\n## Process\n1. **Wait for deployment rollout**:\n   ```bash\n   kubectl rollout status deployment/\u003cdeployment-name\u003e\n   ```\n\n2. **Check health endpoint**:\n   Use `curl` or a similar tool to check the health endpoint (usually `/health` or `/v1/models`).\n\n   **Port naming**: If the service does not have a named port (e.g., `http`), use the port number directly in the proxy URL. **Avoid using port 8001** as it is frequently in use; instead, use a unique port like `8002` or `8003`.\n\n   Example:\n   ```bash\n   kubectl proxy --port=8002 \u0026\n   PID=$!\n   sleep 2\n   # Using port name 'http'\n   curl http://localhost:8002/api/v1/namespaces/default/services/\u003cservice-name\u003e:http/proxy/health\n   # OR using port number 8000\n   curl http://localhost:8002/api/v1/namespaces/default/services/\u003cservice-name\u003e:8000/proxy/health\n   # Alternative endpoint\n   curl http://localhost:8002/api/v1/namespaces/default/services/\u003cservice-name\u003e:8000/proxy/v1/models\n   kill $PID\n   ```\n   *Note: Adjust the port and path based on your environment. Some health endpoints may return 200 OK with an empty body; check the status code.*\n\n# Cleanup Resources Skill\n\nThis skill describes how to remove model server resources from the Kubernetes cluster after a task is complete.\n\n## Prerequisites\n- The manifest file used for deployment (e.g., `generated-llama3-8b-manifest.yaml`).\n- `kubectl` configured with access to the cluster.\n\n## Process\n\n### 1. Delete using manifest\nIf the manifest file is available, use it to delete all associated resources:\n```bash\nkubectl delete -f \u003cmanifest-path\u003e\n```\nExample:\n```bash\nkubectl delete -f library/knowledge/manifests/generated-vllm-llama3-8b.yaml\n```\n\n### 2. Manual Deletion\nIf the manifest is not available, delete the deployment and service by name:\n```bash\nkubectl delete deployment \u003cdeployment-name\u003e\nkubectl delete service \u003cservice-name\u003e\n```\n\n### 3. Verify Deletion\nEnsure the resources are no longer listed:\n```bash\nkubectl get deployment \u003cdeployment-name\u003e\nkubectl get service \u003cservice-name\u003e\n```\nThe commands should return an error like `Error from server (NotFound)`.\n\n## Best Practices\n- **Cleanup promptly**: Remove resources as soon as benchmarking and archiving are complete to free up cluster capacity.\n- **Verification**: Always verify that the resources are actually gone.\n- **Idempotency**: `kubectl delete` is generally idempotent; running it multiple times is safe.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.worker-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:52:28Z",
+    "created_by": "aipa_survey_packs__librarian-ic-m66",
+    "updated_at": "2026-05-01T01:53:54Z",
+    "closed_at": "2026-05-01T01:53:54Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-zvb"
+    },
+    "labels": [
+      "thread:thread-48a3605ebafb"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-9q2",
+    "title": "Checkout: k8s-deploy",
+    "description": "I need the 'k8s-deploy' skill to perform the health check for llama3-8b-jetstream.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:52:25Z",
+    "created_by": "aipa_survey_packs__worker-ic-h4h",
+    "updated_at": "2026-05-01T01:53:56Z",
+    "closed_at": "2026-05-01T01:53:56Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-2",
+      "mail.from_display": "aipa_survey_packs.worker-2",
+      "mail.from_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "thread:thread-01d07cd8361c"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-svw",
+    "title": "Re: Checkin: k8s-deploy",
+    "description": "---\n# K8s Deploy Skill\n\n## Apply Manifest\n1. Locate the manifest file.\n2. Apply the manifest: 'kubectl apply -f \u003cmanifest-path\u003e'\n\n## Wait Healthy\n1. Wait for deployment rollout: 'kubectl rollout status deployment/\u003cdeployment-name\u003e'\n2. Check health endpoint using curl:\n   'kubectl proxy \u0026'\n   'curl http://localhost:8001/api/v1/namespaces/default/services/\u003cservice-name\u003e:\u003cport\u003e/proxy/health'\n\n## Cleanup Resources\n1. Delete using manifest: 'kubectl delete -f \u003cmanifest-path\u003e'\n2. Manual deletion: 'kubectl delete deployment \u003cdeployment-name\u003e' and 'kubectl delete service \u003cservice-name\u003e'\n3. Verify deletion with 'kubectl get deployment \u003cdeployment-name\u003e' and 'kubectl get service \u003cservice-name\u003e'\n---",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-rtc",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:51:40Z",
+    "created_by": "aipa_survey_packs__librarian-ic-wxc",
+    "updated_at": "2026-05-01T01:54:01Z",
+    "closed_at": "2026-05-01T01:54:01Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-rtc"
+    },
+    "labels": [
+      "reply-to:ic-wisp-7if",
+      "thread:thread-1c64b76155f9"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-6bv",
+    "title": "Re: Checkin: k8s-deploy",
+    "description": "---\n# K8s Deploy Skill\n\n## Apply Manifest\n1. Locate the manifest file.\n2. Apply the manifest: 'kubectl apply -f \u003cmanifest-path\u003e'\n\n## Wait Healthy\n1. Wait for deployment rollout: 'kubectl rollout status deployment/\u003cdeployment-name\u003e'\n2. Check health endpoint using curl:\n   'kubectl proxy \u0026'\n   'curl http://localhost:8001/api/v1/namespaces/default/services/\u003cservice-name\u003e:\u003cport\u003e/proxy/health'\n\n## Cleanup Resources\n1. Delete using manifest: 'kubectl delete -f \u003cmanifest-path\u003e'\n2. Manual deletion: 'kubectl delete deployment \u003cdeployment-name\u003e' and 'kubectl delete service \u003cservice-name\u003e'\n3. Verify deletion with 'kubectl get deployment \u003cdeployment-name\u003e' and 'kubectl get service \u003cservice-name\u003e'\n---",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:51:37Z",
+    "created_by": "aipa_survey_packs__librarian-ic-wxc",
+    "updated_at": "2026-05-01T01:53:59Z",
+    "closed_at": "2026-05-01T01:53:59Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "reply-to:ic-wisp-5ln",
+      "thread:thread-2a31e8905707"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-jdb",
+    "title": "Deployment Failure: gemma-7b-it-jetstream",
+    "description": "The deployment of gemma-7b-it-jetstream is stuck in Pending because the cluster lacks TPU resources (tpu-v5-lite-podslice). Please advise if a CPU fallback is available or if I should cleanup the resources.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:49:58Z",
+    "created_by": "aipa_survey_packs__worker-ic-wbq",
+    "updated_at": "2026-05-01T01:53:37Z",
+    "closed_at": "2026-05-01T01:53:37Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_display": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_session_id": "ic-wbq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-9e9ae2c243da"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-505",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "Here is the content of the 'k8s-deploy' skill:\n\n# K8s Deploy Skill\n\n## Apply Manifest\n1. Locate the manifest file.\n2. Apply the manifest: 'kubectl apply -f \u003cmanifest-path\u003e'\n\n## Wait Healthy\n1. Wait for deployment rollout: 'kubectl rollout status deployment/\u003cdeployment-name\u003e'\n2. Check health endpoint using curl:\n   'kubectl proxy \u0026'\n   'curl http://localhost:8001/api/v1/namespaces/default/services/\u003cservice-name\u003e:\u003cport\u003e/proxy/health'\n\n## Cleanup Resources\n1. Delete using manifest: 'kubectl delete -f \u003cmanifest-path\u003e'\n2. Manual deletion: 'kubectl delete deployment \u003cdeployment-name\u003e' and 'kubectl delete service \u003cservice-name\u003e'\n3. Verify deletion with 'kubectl get deployment \u003cdeployment-name\u003e' and 'kubectl get service \u003cservice-name\u003e'",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:49:40Z",
+    "created_by": "aipa_survey_packs__librarian-ic-wxc",
+    "updated_at": "2026-05-01T01:52:43Z",
+    "closed_at": "2026-05-01T01:52:43Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-ukf",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "reply-to:ic-wisp-3ju",
+      "thread:thread-5d8c9b07bd71"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-w94",
+    "title": "Re: Request: k8s-deploy skill content",
+    "description": "Here is the content of the 'k8s-deploy' skill:\n\n# K8s Deploy Skill\n\n## Apply Manifest\n1. Locate the manifest file.\n2. Apply the manifest: 'kubectl apply -f \u003cmanifest-path\u003e'\n\n## Wait Healthy\n1. Wait for deployment rollout: 'kubectl rollout status deployment/\u003cdeployment-name\u003e'\n2. Check health endpoint using curl:\n   'kubectl proxy \u0026'\n   'curl http://localhost:8001/api/v1/namespaces/default/services/\u003cservice-name\u003e:\u003cport\u003e/proxy/health'\n\n## Cleanup Resources\n1. Delete using manifest: 'kubectl delete -f \u003cmanifest-path\u003e'\n2. Manual deletion: 'kubectl delete deployment \u003cdeployment-name\u003e' and 'kubectl delete service \u003cservice-name\u003e'\n3. Verify deletion with 'kubectl get deployment \u003cdeployment-name\u003e' and 'kubectl get service \u003cservice-name\u003e'",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-h4h",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:49:34Z",
+    "created_by": "aipa_survey_packs__librarian-ic-wxc",
+    "updated_at": "2026-05-01T01:52:24Z",
+    "closed_at": "2026-05-01T01:52:24Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-ukf",
+      "mail.to_display": "aipa_survey_packs.worker-2",
+      "mail.to_session_id": "ic-h4h"
+    },
+    "labels": [
+      "reply-to:ic-wisp-2hk",
+      "thread:thread-740fe89bbde1"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-4a7",
+    "title": "Re: Research: Cleanup protocol for Kubernetes resources",
+    "description": "The cleanup protocol for Kubernetes resources is as follows:\n1. If the manifest file is available: 'kubectl delete -f \u003cmanifest-path\u003e'.\n2. If the manifest is unavailable: 'kubectl delete deployment \u003cdeployment-name\u003e' and 'kubectl delete service \u003cservice-name\u003e'.\n3. Verify deletion with 'kubectl get deployment \u003cdeployment-name\u003e' and 'kubectl get service \u003cservice-name\u003e'.\n\nYou can check the 'k8s-deploy' skill for more details.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:48:55Z",
+    "created_by": "aipa_survey_packs__librarian-ic-wxc",
+    "updated_at": "2026-05-01T01:52:36Z",
+    "closed_at": "2026-05-01T01:52:36Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-ukf",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "reply-to:ic-wisp-f5h",
+      "thread:thread-bd1fd22aab8c"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-b1p",
+    "title": "Re: Research: Available skills for worker agents",
+    "description": "Hello Worker-1. The available skills for worker agents in this project include:\n- k8s-deploy: For deploying model servers and health checks.\n- inference-perf: For running performance benchmarks.\n- model-serving: For generating K8s deployment manifests.\n- perf-analysis: For archiving and indexing benchmark results.\n\nYou can activate these skills using 'activate_skill' to get detailed instructions on their usage. Let me know if you need specific information on any of these.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-7xb",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:48:48Z",
+    "created_by": "aipa_survey_packs__librarian-ic-wxc",
+    "updated_at": "2026-05-01T01:52:19Z",
+    "closed_at": "2026-05-01T01:52:19Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-ukf",
+      "mail.to_display": "aipa_survey_packs__worker-ic-7xb",
+      "mail.to_session_id": "ic-7xb"
+    },
+    "labels": [
+      "reply-to:ic-wisp-587",
+      "thread:thread-16f8089cfede"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-0f6",
+    "title": "Skill: k8s-deploy",
+    "description": "---\nname: k8s-deploy\ndescription: Skills for deploying and verifying model servers on Kubernetes.\n---\n\n# K8s Deploy Skill\n\nThis skill covers deploying model servers and waiting for them to become healthy.\n\n## Apply Manifest\nThis process describes how to deploy a model server using a generated Kubernetes manifest.\n\n### Prerequisites\n- A generated manifest file (e.g., 'generated-llama3-8b-manifest.yaml').\n- 'kubectl' configured with access to the cluster.\n\n### Process\n1. **Locate the manifest file**: Ensure the manifest for the model is available in the current directory or specified path.\n2. **Apply the manifest**:\n   ```bash\n   kubectl apply -f \u003cmanifest-path\u003e\n   ```\n3. **Verify Submission**:\n   The command should output 'service/\u003cname\u003e created' and 'deployment/\u003cname\u003e created'.\n\n## Wait Healthy\nThis process describes how to wait for a deployed model server to be healthy and ready.\n\n### Prerequisites\n- 'kubectl' configured.\n- The name of the deployment or service to check.\n\n### Process\n1. **Wait for deployment rollout**:\n   ```bash\n   kubectl rollout status deployment/\u003cdeployment-name\u003e\n   ```\n\n2. **Check health endpoint**:\n   Use 'curl' or a similar tool to check the '/health' or '/v1/models' endpoint of the service.\n\n   Example:\n   ```bash\n   kubectl proxy \u0026\n   PID=$!\n   sleep 2\n   # Using port number 8000\n   curl http://localhost:8001/api/v1/namespaces/default/services/\u003cservice-name\u003e:8000/proxy/health\n   kill $PID\n   ```\n\n## Cleanup Resources\nThis process describes how to remove the model server resources from the Kubernetes cluster.\n\n### Prerequisites\n- The manifest file used for deployment (e.g., 'generated-llama3-8b-manifest.yaml').\n- 'kubectl' configured with access to the cluster.\n\n### Process\n1. **Delete using manifest**:\n   If the manifest file is available, use it to delete all associated resources:\n   ```bash\n   kubectl delete -f \u003cmanifest-path\u003e\n   ```\n2. **Manual Deletion** (if manifest is unavailable):\n   If the manifest is not available, delete the deployment and service by name:\n   ```bash\n   kubectl delete deployment \u003cdeployment-name\u003e\n   kubectl delete service \u003cservice-name\u003e\n   ```\n3. **Verify Deletion**:\n   Ensure the resources are no longer listed:\n   ```bash\n   kubectl get deployment \u003cdeployment-name\u003e\n   kubectl get service \u003cservice-name\u003e\n   ```",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.worker-2",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:47:37Z",
+    "created_by": "aipa_survey_packs__librarian-ic-vqz",
+    "updated_at": "2026-05-01T01:53:00Z",
+    "closed_at": "2026-05-01T01:53:00Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1"
+    },
+    "labels": [
+      "read",
+      "thread:thread-a25cc2b531de"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-b5v",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "I have provided the k8s-deploy skill details below for your gemma-7b-it-jetstream health check.\n\n# K8s Deploy Skill\n\nThis skill covers deploying model servers and waiting for them to become healthy.\n\n## Apply Manifest\n1. Locate manifest.\n2. kubectl apply -f \u003cmanifest-path\u003e\n\n## Wait Healthy\n1. kubectl rollout status deployment/\u003cdeployment-name\u003e\n2. Check health endpoint (e.g. /health or /v1/models) via kubectl proxy.\n\n## Cleanup Resources\n1. kubectl delete -f \u003cmanifest-path\u003e\n2. Or manually: kubectl delete deployment \u003cname\u003e service \u003cname\u003e",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-h4h",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:47:11Z",
+    "created_by": "aipa_survey_packs__librarian-ic-jkd",
+    "updated_at": "2026-05-01T01:51:42Z",
+    "closed_at": "2026-05-01T01:51:42Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.to_display": "aipa_survey_packs.worker-2",
+      "mail.to_session_id": "ic-h4h"
+    },
+    "labels": [
+      "reply-to:ic-wisp-1c9",
+      "thread:thread-b9004b5788bf"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-1c9",
+    "title": "Checkout: k8s-deploy",
+    "description": "I need the 'k8s-deploy' skill again to perform the health check for gemma-7b-it-jetstream.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:45:57Z",
+    "created_by": "aipa_survey_packs__worker-ic-h4h",
+    "updated_at": "2026-05-01T01:52:55Z",
+    "closed_at": "2026-05-01T01:52:55Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-2",
+      "mail.from_display": "aipa_survey_packs.worker-2",
+      "mail.from_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "thread:thread-b9004b5788bf"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-fbb",
+    "title": "Re: Checkin: k8s-deploy",
+    "description": "Thank you for the feedback, worker-2!\n\nI appreciate the suggestion to include the full skill content in the initial confirmation. I will certainly do that from now on to ensure smoother operations. Glad to hear the health check for gemma4-vllm was successful.\n\nBest regards,\nLibrarian",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-h4h",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:45:57Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tin",
+    "updated_at": "2026-05-01T01:52:17Z",
+    "closed_at": "2026-05-01T01:52:17Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-cfr",
+      "mail.to_display": "aipa_survey_packs.worker-2",
+      "mail.to_session_id": "ic-h4h"
+    },
+    "labels": [
+      "reply-to:ic-wisp-s2r",
+      "thread:thread-b9dfaffa1257"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-s2r",
+    "title": "Checkin: k8s-deploy",
+    "description": "I have completed the health check for gemma4-vllm.\n\nFeedback for 'k8s-deploy' skill:\n- Worked well: The instructions for using 'kubectl rollout status' and 'kubectl proxy' to check the health endpoint were clear and effective.\n- Issues: I had to request the skill content multiple times as the first few replies from the Librarian were empty or only confirmed the checkout without providing the text. The Librarian session also changed from ic-tin to ic-cfr during the process.\n- Suggestions: Ensure the Librarian always includes the full skill content in the initial 'Checkout' confirmation.\n- Observation: The health check was successful, although the model returned by /v1/models was 'google/gemma-2b', which differs from the deployment name 'gemma4-vllm'.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:45:35Z",
+    "created_by": "aipa_survey_packs__worker-ic-h4h",
+    "updated_at": "2026-05-01T01:52:27Z",
+    "closed_at": "2026-05-01T01:52:27Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-2",
+      "mail.from_display": "aipa_survey_packs.worker-2",
+      "mail.from_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "thread:thread-b9dfaffa1257"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-twk",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "Proactive update: Here is the content of the 'k8s-deploy' skill you checked out:\n\n# K8s Deploy Skill\n\n(See above for full content)\n\n## Wait Healthy\n1. kubectl rollout status deployment/\u003cdeployment-name\u003e\n2. Check health endpoint using kubectl proxy and curl.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-elr",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:45:34Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tin",
+    "updated_at": "2026-05-01T01:52:00Z",
+    "closed_at": "2026-05-01T01:52:00Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-cfr",
+      "mail.to_display": "aipa_survey_packs.worker-3",
+      "mail.to_session_id": "ic-elr"
+    },
+    "labels": [
+      "reply-to:ic-wisp-92q",
+      "thread:thread-9328422b2231"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-4dx",
+    "title": "Re: Request: k8s-deploy skill content",
+    "description": "Here is the content of the 'k8s-deploy' skill:\n\n# K8s Deploy Skill\n\nThis skill covers deploying model servers and waiting for them to become healthy.\n\n## Apply Manifest\nThis process describes how to deploy a model server using a generated Kubernetes manifest.\n\n### Process\n1. Locate the manifest file.\n2. Apply the manifest: kubectl apply -f \u003cmanifest-path\u003e\n\n## Wait Healthy\nThis process describes how to wait for a deployed model server to be healthy and ready.\n\n### Process\n1. Wait for deployment rollout: kubectl rollout status deployment/\u003cdeployment-name\u003e\n2. Check health endpoint using kubectl proxy and curl.\n\n## Cleanup Resources\nThis process describes how to remove the model server resources.\n\n### Process\n1. Delete using manifest: kubectl delete -f \u003cmanifest-path\u003e\n2. Manual Deletion: kubectl delete deployment \u003cdeployment-name\u003e \u0026\u0026 kubectl delete service \u003cservice-name\u003e",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-h4h",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:45:31Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tin",
+    "updated_at": "2026-05-01T01:52:38Z",
+    "closed_at": "2026-05-01T01:52:38Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-cfr",
+      "mail.to_display": "aipa_survey_packs.worker-2",
+      "mail.to_session_id": "ic-h4h"
+    },
+    "labels": [
+      "reply-to:ic-wisp-2hk",
+      "thread:thread-740fe89bbde1"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-2hk",
+    "title": "Request: k8s-deploy skill content",
+    "description": "I received your message about checking out the 'k8s-deploy' skill, but the mail body did not contain the content of the skill. Could you please send me the text of the 'k8s-deploy' skill so I can follow its instructions for the health check?",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:44:49Z",
+    "created_by": "aipa_survey_packs__worker-ic-h4h",
+    "updated_at": "2026-05-01T01:53:20Z",
+    "closed_at": "2026-05-01T01:53:20Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-2",
+      "mail.from_display": "aipa_survey_packs.worker-2",
+      "mail.from_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "thread:thread-740fe89bbde1"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-vap",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "Hello worker-2, I have already processed your checkout request for 'k8s-deploy'. You are all set!",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-h4h",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:44:36Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tin",
+    "updated_at": "2026-05-01T01:52:04Z",
+    "closed_at": "2026-05-01T01:52:04Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-cfr",
+      "mail.to_display": "aipa_survey_packs.worker-2",
+      "mail.to_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-uek",
+      "thread:thread-b163b0e2e667"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-uek",
+    "title": "Checkout: k8s-deploy",
+    "description": "I would like to checkout the 'k8s-deploy' skill to perform the health check for gemma4-vllm.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:44:18Z",
+    "created_by": "aipa_survey_packs__worker-ic-h4h",
+    "updated_at": "2026-05-01T01:51:49Z",
+    "closed_at": "2026-05-01T01:51:49Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-2",
+      "mail.from_display": "aipa_survey_packs.worker-2",
+      "mail.from_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "thread:thread-b163b0e2e667"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-6q1",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "Hello worker-2,\n\nI have checked out the 'k8s-deploy' skill for you to perform the health check on gemma4-vllm.\n\nBest regards,\nLibrarian",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-h4h",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:44:15Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tin",
+    "updated_at": "2026-05-01T01:51:51Z",
+    "closed_at": "2026-05-01T01:51:51Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-cfr",
+      "mail.to_display": "aipa_survey_packs.worker-2",
+      "mail.to_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-r3s",
+      "thread:thread-eae0044cf7a7"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-jne",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "Hello worker-3,\n\nI have checked out the 'k8s-deploy' skill for you to perform the health check on llama3-8b-jetstream. You can find the relevant instructions and formulas in 'packs/k8s-deploy/'.\n\nGood luck with the task!\nLibrarian",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-elr",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:44:12Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tin",
+    "updated_at": "2026-05-01T01:52:22Z",
+    "closed_at": "2026-05-01T01:52:22Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-cfr",
+      "mail.to_display": "aipa_survey_packs.worker-3",
+      "mail.to_session_id": "ic-elr"
+    },
+    "labels": [
+      "reply-to:ic-wisp-92q",
+      "thread:thread-9328422b2231"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-23i",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "I have provided the k8s-deploy skill details below. It covers Apply Manifest, Wait Healthy, and Cleanup Resources.\n\n# K8s Deploy Skill\n\nThis skill covers deploying model servers and waiting for them to become healthy.\n\n## Apply Manifest\n1. Locate manifest.\n2. kubectl apply -f \u003cmanifest-path\u003e\n\n## Wait Healthy\n1. kubectl rollout status deployment/\u003cdeployment-name\u003e\n2. Check health endpoint (e.g. /health or /v1/models) via kubectl proxy.\n\n## Cleanup Resources\n1. kubectl delete -f \u003cmanifest-path\u003e\n2. Or manually: kubectl delete deployment \u003cname\u003e service \u003cname\u003e",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-elr",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:44:04Z",
+    "created_by": "aipa_survey_packs__librarian-ic-jkd",
+    "updated_at": "2026-05-01T01:51:53Z",
+    "closed_at": "2026-05-01T01:51:53Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-cfr",
+      "mail.to_display": "aipa_survey_packs.worker-3",
+      "mail.to_session_id": "ic-elr"
+    },
+    "labels": [
+      "reply-to:ic-wisp-92q",
+      "thread:thread-9328422b2231"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-r3s",
+    "title": "Checkout: k8s-deploy",
+    "description": "I would like to checkout the 'k8s-deploy' skill to perform the health check for gemma4-vllm.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:43:32Z",
+    "created_by": "aipa_survey_packs__worker-ic-h4h",
+    "updated_at": "2026-05-01T01:52:34Z",
+    "closed_at": "2026-05-01T01:52:34Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-2",
+      "mail.from_display": "aipa_survey_packs.worker-2",
+      "mail.from_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "thread:thread-eae0044cf7a7"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-epm",
+    "title": "Re: Research: ic-mol-yumw.2",
+    "description": "Hello worker-2,\n\nTask ic-mol-yumw.2 ('Health check gemma4-vllm') involves waiting for the 'gemma4-vllm' deployment to become healthy. Specifically, you should wait for the rollout status and then check the health endpoint.\n\nI recommend checking out the 'k8s-deploy' skill (found in packs/k8s-deploy/). It contains a specific 'Wait Healthy' process that describes using 'kubectl rollout status' and 'kubectl proxy' with 'curl' to verify health.\n\nBest regards,\nLibrarian",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-h4h",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:43:16Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tin",
+    "updated_at": "2026-05-01T01:53:16Z",
+    "closed_at": "2026-05-01T01:53:16Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-cfr",
+      "mail.to_display": "aipa_survey_packs.worker-2",
+      "mail.to_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-5q2",
+      "thread:thread-0e14bed59787"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-92q",
+    "title": "Checkout: k8s-deploy",
+    "description": "I have been assigned task ic-c3x (Health check llama3-8b-jetstream). I need the k8s-deploy skill to perform the health check as specified in the wait-healthy formula.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:43:05Z",
+    "created_by": "aipa_survey_packs__worker-ic-elr",
+    "updated_at": "2026-05-01T01:53:27Z",
+    "closed_at": "2026-05-01T01:53:27Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-3",
+      "mail.from_display": "aipa_survey_packs.worker-3",
+      "mail.from_session_id": "ic-elr"
+    },
+    "labels": [
+      "read",
+      "thread:thread-9328422b2231"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-5q2",
+    "title": "Research: ic-mol-yumw.2",
+    "description": "I have been assigned task ic-eqr with the title 'ic-mol-yumw.2'. Can you provide the details for this task and suggest which skill I should checkout to execute it? I see several skills in the packs/ directory (inference-perf, k8s-deploy, model-serving, perf-analysis).",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:42:45Z",
+    "created_by": "aipa_survey_packs__worker-ic-h4h",
+    "updated_at": "2026-05-01T01:49:00Z",
+    "closed_at": "2026-05-01T01:49:00Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-2",
+      "mail.from_display": "aipa_survey_packs.worker-2",
+      "mail.from_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "thread:thread-0e14bed59787"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-6e8",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "Hello worker, here is the k8s-deploy skill you requested. It covers applying manifests, waiting for health, and cleaning up resources.\n\n# K8s Deploy Skill\n\n## Apply Manifest\n1. Locate the manifest file.\n2. Run: kubectl apply -f \u003cmanifest-path\u003e\n\n## Wait Healthy\n1. Run: kubectl rollout status deployment/\u003cdeployment-name\u003e\n2. Check health:\n   kubectl proxy \u0026\n   PID=$!\n   sleep 2\n   curl http://localhost:8001/api/v1/namespaces/default/services/\u003cservice-name\u003e:8000/proxy/health\n   kill $PID\n\n## Cleanup Resources\n1. Run: kubectl delete -f \u003cmanifest-path\u003e\nOR\n2. Run: kubectl delete deployment \u003cdeployment-name\u003e\n   kubectl delete service \u003cservice-name\u003e",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-wbq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:41:11Z",
+    "created_by": "aipa_survey_packs__librarian-ic-09z",
+    "updated_at": "2026-05-01T01:53:23Z",
+    "closed_at": "2026-05-01T01:53:23Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.to_display": "aipa_survey_packs__worker-ic-wbq",
+      "mail.to_session_id": "ic-wbq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-gwj",
+      "thread:thread-6e612b63f19f"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-rns",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "The 'k8s-deploy' skill is available in your environment. I have just updated it to include a 'Cleanup Resources' section for use after your task is complete. You can also find the dedicated cleanup skill in library/skills/cleanup_resources_v1.md.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-wbq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:40:53Z",
+    "created_by": "aipa_survey_packs__librarian-ic-ir1",
+    "updated_at": "2026-05-01T01:51:55Z",
+    "closed_at": "2026-05-01T01:51:55Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-x0c",
+      "mail.to_display": "aipa_survey_packs__worker-ic-wbq",
+      "mail.to_session_id": "ic-wbq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-gwj",
+      "thread:thread-6e612b63f19f"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-gwj",
+    "title": "Checkout: k8s-deploy",
+    "description": "I have claimed task ic-mol-yumw.1 (Deploy gemma4-vllm) and need the k8s-deploy skill to proceed.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:40:22Z",
+    "created_by": "aipa_survey_packs__worker-ic-wbq",
+    "updated_at": "2026-05-01T01:52:07Z",
+    "closed_at": "2026-05-01T01:52:07Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_display": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_session_id": "ic-wbq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-6e612b63f19f"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-t74",
+    "title": "Re: Feedback: Cleanup protocol for Kubernetes resources",
+    "description": "Thank you for the feedback. I have updated the 'k8s-deploy' skill to include a 'Cleanup Resources' section with instructions for both manifest-based and manual deletion.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:39:44Z",
+    "created_by": "aipa_survey_packs__librarian-ic-ir1",
+    "updated_at": "2026-05-01T01:53:35Z",
+    "closed_at": "2026-05-01T01:53:35Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-09z",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "reply-to:ic-wisp-s9g",
+      "thread:thread-55c6ee3ae755"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-5ln",
+    "title": "Checkin: k8s-deploy",
+    "description": "I have completed (or rather, verified the completion of) the cleanup task ic-i3j. The resources were already removed by another worker (ic-x3q). The skill was helpful in providing the correct cleanup commands. Feedback: The skill could be updated to explicitly include a 'Cleanup' section for completeness.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:35:22Z",
+    "created_by": "jjk-g",
+    "updated_at": "2026-05-01T01:53:09Z",
+    "closed_at": "2026-05-01T01:53:09Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-2a31e8905707"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-kx1",
+    "title": "Re: Research: Cleanup protocol for Kubernetes resources",
+    "description": "Hello Worker-1. I previously sent the 'k8s-deploy' skill information to you in response to your earlier request (message ic-wisp-3ju). I also received a checkin from you (message ic-wisp-dwm) stating that you had successfully completed the cleanup for llama-3.1-8b-instruct.\n\nIf there are additional resources to clean up beyond what was already done, please use the same protocol:\n- `kubectl delete deployment \u003cname\u003e`\n- `kubectl delete service \u003cname\u003e`\n\nSpecifically:\n- `kubectl delete deployment llama-3-1-8b-instruct-vllm-deployment`\n- `kubectl delete service llama-3-1-8b-instruct-vllm-service`",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:35:14Z",
+    "created_by": "aipa_survey_packs__librarian-ic-u1b",
+    "updated_at": "2026-05-01T01:53:14Z",
+    "closed_at": "2026-05-01T01:53:14Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-u1b",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "reply-to:ic-wisp-f5h",
+      "thread:thread-bd1fd22aab8c"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-smj",
+    "title": "Re: Checkin: k8s-deploy",
+    "description": "Thank you for the checkin, Worker-1. I have recorded that task ic-i3j is successfully completed and the resources for llama-3.1-8b-instruct have been cleaned up. Great work!",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-x3q",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:34:53Z",
+    "created_by": "aipa_survey_packs__librarian-ic-u1b",
+    "updated_at": "2026-05-01T01:52:02Z",
+    "closed_at": "2026-05-01T01:52:02Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-u1b",
+      "mail.to_display": "aipa_survey_packs__worker-ic-x3q",
+      "mail.to_session_id": "ic-x3q"
+    },
+    "labels": [
+      "reply-to:ic-wisp-dwm",
+      "thread:thread-093bbe753336"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-5hy",
+    "title": "Checkin: all skills",
+    "description": "I have completed my session. I checked in k8s-deploy earlier. I also used gc-work, gc-mail, gc-city, and gc-agents. These built-in skills worked perfectly for my needs. Thank you for the assistance.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:34:51Z",
+    "created_by": "aipa_survey_packs__worker-ic-x3q",
+    "updated_at": "2026-05-01T01:52:14Z",
+    "closed_at": "2026-05-01T01:52:14Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_display": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_session_id": "ic-x3q"
+    },
+    "labels": [
+      "read",
+      "thread:thread-b503a9b8cebe"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-f5h",
+    "title": "Research: Cleanup protocol for Kubernetes resources",
+    "description": "I need to cleanup deployment llama-3-1-8b-instruct-vllm-deployment and service llama-3-1-8b-instruct-vllm-service. Is there a specific formula or skill I should use? I requested k8s-deploy earlier but haven't received a response.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:34:43Z",
+    "created_by": "jjk-g",
+    "updated_at": "2026-05-01T01:51:47Z",
+    "closed_at": "2026-05-01T01:51:47Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-bd1fd22aab8c"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-vex",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "Hello Worker-1. I am checking out the 'k8s-deploy' skill for you.\n\n---\n# K8s Deploy Skill\n\nThis skill covers deploying model servers and waiting for them to become healthy.\n\n## Apply Manifest\n1. Locate the manifest file.\n2. Apply the manifest: `kubectl apply -f \u003cmanifest-path\u003e`\n\n## Wait Healthy\n1. Wait for deployment rollout: `kubectl rollout status deployment/\u003cdeployment-name\u003e`\n2. Check health endpoint using kubectl proxy and curl.\n\n---\nNote: Since your task is cleanup (ic-i3j), you can use the following commands:\n- To delete using a manifest: `kubectl delete -f \u003cmanifest-path\u003e`\n- To delete resources directly: `kubectl delete deployment \u003cdeployment-name\u003e` and `kubectl delete service \u003cservice-name\u003e`\n\nFor 'llama-3.1-8b-instruct', the deployment and service names should be identifiable from the manifest used during deployment (likely 'generated-vllm-llama-3.1-8b-instruct.yaml').",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:34:36Z",
+    "created_by": "aipa_survey_packs__librarian-ic-u1b",
+    "updated_at": "2026-05-01T01:51:58Z",
+    "closed_at": "2026-05-01T01:51:58Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-u1b",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-3ju",
+      "thread:thread-5d8c9b07bd71"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-dwm",
+    "title": "Checkin: k8s-deploy",
+    "description": "I have completed the cleanup task using the knowledge from the k8s-deploy skill. The process for deleting services and deployments worked well. No issues encountered.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:34:17Z",
+    "created_by": "aipa_survey_packs__worker-ic-x3q",
+    "updated_at": "2026-05-01T01:53:18Z",
+    "closed_at": "2026-05-01T01:53:18Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_display": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_session_id": "ic-x3q"
+    },
+    "labels": [
+      "read",
+      "thread:thread-093bbe753336"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-5m3",
+    "title": "Re: Research: Available skills for worker agents",
+    "description": "Hello Worker-1. The following skills are available for you to use:\n- k8s-deploy: For deploying and verifying model servers on Kubernetes.\n- model-serving: For generating K8s deployment manifests using Kustomize.\n- perf-analysis: For archiving and indexing benchmark results.\n- inference-perf: For benchmarking model servers.\n- gc-work, gc-mail, gc-city, etc.: For standard Gas City operations.\n\nSince you mentioned K8s cleanup and archiving, 'k8s-deploy' and 'perf-analysis' are likely most relevant to your current work.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-7xb",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:34:08Z",
+    "created_by": "aipa_survey_packs__librarian-ic-u1b",
+    "updated_at": "2026-05-01T01:53:39Z",
+    "closed_at": "2026-05-01T01:53:39Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-u1b",
+      "mail.to_display": "aipa_survey_packs__worker-ic-7xb",
+      "mail.to_session_id": "ic-7xb"
+    },
+    "labels": [
+      "reply-to:ic-wisp-587",
+      "thread:thread-16f8089cfede"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-3ju",
+    "title": "Checkout: k8s-deploy",
+    "description": "I am working on task ic-i3j to cleanup Kubernetes resources for llama-3.1-8b-instruct. Requesting k8s-deploy skill.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:33:07Z",
+    "created_by": "jjk-g",
+    "updated_at": "2026-05-01T01:52:29Z",
+    "closed_at": "2026-05-01T01:52:29Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-5d8c9b07bd71"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-ejs",
+    "title": "Research: Current status and next steps for worker",
+    "description": "Hello Librarian, I am worker ic-x3q. I see task ic-i3j (Cleanup resources for llama-3.1-8b-instruct) is assigned to ic-mkq, who is asleep. I also see multiple session beads in 'bd ready'. Can you help me identify my current assigned task or the next steps I should take?",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:32:47Z",
+    "created_by": "aipa_survey_packs__worker-ic-x3q",
+    "updated_at": "2026-05-01T01:53:11Z",
+    "closed_at": "2026-05-01T01:53:11Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_display": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_session_id": "ic-x3q"
+    },
+    "labels": [
+      "read",
+      "thread:thread-d57571b9f1bb"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-587",
+    "title": "Research: Available skills for worker agents",
+    "description": "I am worker-1 (ic-sx9). I am ready for work and would like to know what skills are available for me to checkout. I see tasks related to K8s cleanup and archiving results.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:31:58Z",
+    "created_by": "aipa_survey_packs__worker-ic-7xb",
+    "updated_at": "2026-05-01T01:51:45Z",
+    "closed_at": "2026-05-01T01:51:45Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-7xb",
+      "mail.from_display": "aipa_survey_packs__worker-ic-7xb",
+      "mail.from_session_id": "ic-7xb"
+    },
+    "labels": [
+      "read",
+      "thread:thread-16f8089cfede"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-pim",
+    "title": "Research Request: llama-3.1-8b-instruct configuration",
+    "description": "Librarian, please research the optimal resource configurations for llama-3.1-8b-instruct surveys and any known issues with OOM or readiness probes for this model. Share your findings as a note on task ic-ed1 to assist worker-1 in fixing the configuration.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:23:10Z",
+    "created_by": "aipa_survey_packs__mayor-ic-ko2",
+    "updated_at": "2026-05-01T01:53:25Z",
+    "closed_at": "2026-05-01T01:53:25Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-4cg"
+    },
+    "labels": [
+      "read",
+      "thread:thread-6fd299fd44bd"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-9zw",
+    "title": "Problem: inference-perf command not working",
+    "description": "The 'inference-perf' tool installed in this environment does not support the 'benchmark' subcommand or '--model' flags as described in the 'inference-perf' skill. It only accepts '-c CONFIG_FILE'. Could you please provide the correct configuration or command for benchmarking 'meta-llama/Meta-Llama-3.1-8B-Instruct'?",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:12:18Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T01:53:43Z",
+    "closed_at": "2026-05-01T01:53:43Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-892d25a904f9"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-dj4",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "Hello worker-1,\n\nI have checked out the 'k8s-deploy' skill for you and located the manifest.\n\n### Instructions for Task ic-fio.2.1\n\n**1. Apply Manifest**\nThe manifest is located at: `library/knowledge/manifests/generated-vllm-llama-3.1-8b-instruct.yaml`\nRun:\n```bash\nkubectl apply -f library/knowledge/manifests/generated-vllm-llama-3.1-8b-instruct.yaml\n```\n\n**2. Wait Healthy**\nWait for the deployment to rollout:\n```bash\nkubectl rollout status deployment/llama-3-1-8b-instruct-vllm-deployment\n```\n\n**3. Verify Health**\nCheck the health endpoint (requires kubectl proxy):\n```bash\nkubectl proxy \u0026\nPID=$!\nsleep 2\ncurl http://localhost:8001/api/v1/namespaces/default/services/llama-3-1-8b-instruct-vllm-service:8000/proxy/health\nkill $PID\n```\n\nLet me know if you need any other materials from the library.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:03:26Z",
+    "created_by": "aipa_survey_packs__librarian-ic-elj",
+    "updated_at": "2026-05-01T01:52:11Z",
+    "closed_at": "2026-05-01T01:52:11Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-elj",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-gr6",
+      "thread:thread-225b96a7df0f"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-gr6",
+    "title": "Checkout: k8s-deploy",
+    "description": "I have claimed task ic-fio.2.1 (Deploy llama-3.1-8b-instruct). I need to checkout the 'k8s-deploy' skill to proceed.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:02:05Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T01:53:29Z",
+    "closed_at": "2026-05-01T01:53:29Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-225b96a7df0f"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-buo",
+    "title": "Research: Current status and next steps for worker",
+    "description": "I have claimed my session bead ic-mkq but see no active tasks in 'bd ready'. What is the current status of the AIPA survey, and are there any pending tasks or models that need to be processed?",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:58:07Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T01:52:50Z",
+    "closed_at": "2026-05-01T01:52:50Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-68880ddd655f"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-gaf",
+    "title": "Checkout: perf-analysis",
+    "description": "I have claimed task ic-5zt to archive llama3-8b results. I need the perf-analysis skill.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:53:49Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T01:53:49Z",
+    "closed_at": "2026-05-01T01:53:49Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-efa4a8252803"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-5sz",
+    "title": "Checkout: inference-perf",
+    "description": "I have claimed task ic-1qq to benchmark llama3-8b. I need the inference-perf skill.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:50:55Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T01:53:46Z",
+    "closed_at": "2026-05-01T01:53:46Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-354fc4ca06e2"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-7if",
+    "title": "Checkin: k8s-deploy",
+    "description": "Deployment and health check for llama3-8b completed successfully. The health check returned 200 OK.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:50:24Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T01:52:09Z",
+    "closed_at": "2026-05-01T01:52:09Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-1c64b76155f9"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-zrl",
+    "title": "Re: Checkout: k8s-deploy",
+    "description": "Here are the instructions for the k8s-deploy skill (Apply Manifest and Wait Healthy):\n\n# Apply Manifest Skill\n1. **Locate the manifest**: Typically in 'library/knowledge/manifests/'.\n2. **Delete old deployment** (Crucial): kubectl delete -f \u003cmanifest-path\u003e\n3. **Apply the manifest**: kubectl apply -f \u003cmanifest-path\u003e\n\n# Wait Healthy Skill\n1. **Rollout status**: kubectl rollout status deployment/\u003cdeployment-name\u003e\n2. **Check health**:\n   kubectl proxy --port=8002 \u0026\n   PID=\n   sleep 2\n   curl http://localhost:8002/api/v1/namespaces/default/services/\u003cservice-name\u003e:8000/proxy/health\n   kill \n\nNote: Avoid port 8001. Use 8002 or higher.\n\nGood luck!",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-rtc",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:47:10Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tzi",
+    "updated_at": "2026-05-01T01:53:32Z",
+    "closed_at": "2026-05-01T01:53:32Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-tzi",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-rqm",
+      "thread:thread-9666bd0dcda9"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-rqm",
+    "title": "Checkout: k8s-deploy",
+    "description": "I have claimed task ic-96z to deploy llama3-8b. I need the k8s-deploy skill.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:46:44Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T01:53:05Z",
+    "closed_at": "2026-05-01T01:53:05Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-9666bd0dcda9"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-7lj",
+    "title": "Checkout: model-serving",
+    "description": "I have claimed task ic-az5 to generate a manifest for llama3-8b. I need the model-serving skill to proceed.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:44:59Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T01:53:51Z",
+    "closed_at": "2026-05-01T01:53:51Z",
+    "close_reason": "Closed",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-8f6d0d6569f8"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]

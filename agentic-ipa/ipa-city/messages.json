@@ -1,0 +1,1677 @@
+[
+  {
+    "id": "ic-wisp-uvp",
+    "title": "Skill: perf-analysis",
+    "description": "# Archive Results Skill\n\nThis skill describes how to archive and index benchmark results in the Gas City Library.\n\n## Prerequisites\n- A directory containing benchmark results (e.g., `reports-YYYYMMDD-HHMMSS`).\n- A model name associated with the results (e.g., `gemma4-vllm`).\n\n## Process\n\n**Note for Workers**: While general instructions prohibit direct library access, you are explicitly permitted (and required) to write to `library/` when executing this skill to ensure consistent knowledge archival.\n\n1. **Create the target directory**:\n   Create a directory for the model results in the library.\n   ```bash\n   mkdir -p library/knowledge/benchmarks/\u003cmodel-name\u003e\n   ```\n\n2. **Move the results**:\n   Move the report files into the newly created directory.\n   ```bash\n   mv -f reports-\u003ctimestamp\u003e/* library/knowledge/benchmarks/\u003cmodel-name\u003e/\n   ```\n\n3. **Update the Library Index**:\n   Add the new knowledge entry to `library/index.json`.\n   ```json\n   \"benchmarks\": {\n     \"\u003cmodel-name\u003e\": \"library/knowledge/benchmarks/\u003cmodel-name\u003e/summary_lifecycle_metrics.json\"\n   }\n   ```\n   *(Note: Adjust the path if multiple files are indexed)*\n\n4. **Update the Library Catalog**:\n   Add a summary of the new results to `library/knowledge/library/catalog/knowledge.md`.\n\n5. **Clean up**:\n   Remove the empty reports directory and any temporary files created during the process, such as `port-forward-*.log` files in the root directory.\n   ```bash\n   rm -rf reports-\u003ctimestamp\u003e\n   rm -f port-forward-*.log\n   ```",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.worker-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:53:16Z",
+    "created_by": "aipa_survey_packs__librarian-ic-m66",
+    "updated_at": "2026-05-01T01:53:16Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-zvb"
+    },
+    "labels": [
+      "thread:thread-3a892cc2271c"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-i48",
+    "title": "Skill: model-serving",
+    "description": "# Generate Manifest Skill\n\nThis skill describes how to generate Kubernetes deployment manifests for model servers using Kustomize.\n\n## Prerequisites\n- `kustomize` installed.\n- Access to the `packs/model-serving/overlays/kustomize` directory.\n\n## Process\n**Note for Workers**: While general instructions prohibit direct library access, you are explicitly permitted (and required) to write to `library/knowledge/manifests/` when executing this skill to ensure consistent knowledge archival.\n\n1. **Navigate to the target overlay**:\n   Identify the model and server type (e.g., vLLM or JetStream) and navigate to its overlay directory. **Crucial**: You must navigate to the subdirectory that contains the `kustomization.yaml` file, which is often an environment-specific folder like `gke/` or `tpu/`.\n   Example for vLLM:\n   ```bash\n   cd packs/model-serving/overlays/kustomize/vllm/gemma4-vllm/gke\n   ```\n\n2. **Generate the manifest**:\n   **Note**: Even if a manifest file for the target model already exists, you should still regenerate it to ensure it is up-to-date with the latest overlay configurations.\n\n   Run `kustomize build` and redirect the output to a YAML file in the `library/knowledge/manifests/` directory. Adjust the relative path as needed (e.g., `../../../../../` if you are in a `gke` subdirectory).\n\n   \n   Naming convention: `generated-\u003cserver\u003e-\u003cmodel\u003e.yaml` (e.g., `generated-vllm-llama3-70b.yaml`).\n\n   Example:\n   ```bash\n   # From packs/model-serving/overlays/kustomize/vllm/llama3-70b\n   kustomize build . \u003e ../../../../../library/knowledge/manifests/generated-vllm-llama3-70b.yaml\n   ```\n\n3. **Verify the output**:\n   Ensure the generated file is not empty and contains valid Kubernetes resources (Deployment, Service, etc.).\n\n## Troubleshooting: Missing Overlay\nIf a model overlay does not exist for your target server type (vLLM or JetStream):\n1. **Find a similar model**: Identify an existing overlay for the same server type (e.g., `gemma-2b` for `vllm`).\n2. **Copy and adapt**: Copy the entire directory structure of the similar model to a new directory named after your target model.\n3. **Update patches**: Modify the `.patch.yaml` files in the new directory to point to the correct model name and deployment identifiers.\n4. **Update kustomization**: Ensure the `kustomization.yaml` correctly references the base and components.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.worker-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:53:11Z",
+    "created_by": "aipa_survey_packs__librarian-ic-m66",
+    "updated_at": "2026-05-01T01:53:11Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-zvb"
+    },
+    "labels": [
+      "thread:thread-f07fa4ab8514"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-9b6",
+    "title": "Skill: inference-perf",
+    "description": "# Inference Performance Skill\n\nThis skill describes how to run inference performance tests against a model server using the `inference-perf` tool.\n\n## Prerequisites\n- `pdm` installed.\n- Access to the `inference-perf` project directory.\n- A running model server (e.g., vLLM).\n\n## Process\nThe preferred method for running `inference-perf` is using a YAML configuration file.\n\n1. **Create a configuration file** (e.g., `benchmark_config.yaml`). See the example below for the required structure.\n2. **Run the benchmark**:\n   ```bash\n   pdm run -p ../inference-perf inference-perf --config benchmark_config.yaml\n   ```\n\n**Note on Connectivity**: If the model server is not directly reachable, use `kubectl port-forward` to map the service port to a local port. **Avoid using port 8001** as it is frequently in use; instead, use a unique port like `8002` or `8003`. \n\n**Warning on vLLM API Path**: When using `server.type: vllm` and `api.type: completion`, the `server.base_url` must **NOT** include the `/v1` suffix. The client automatically appends `/v1/completions` to the base URL. Including `/v1` in the base URL will result in an incorrect path like `/v1/v1/completions`.\n\n### Example Configuration (`benchmark_config.yaml`)\n```yaml\nserver:\n  type: vllm\n  base_url: http://localhost:8002 # No /v1 suffix\n  model_name: meta-llama/Meta-Llama-3.1-8B-Instruct\napi:\n  type: completion\n  streaming: true\ndata:\n  type: random\n  input_distribution:\n    min: 128\n    max: 1024\n    mean: 512\n    type: uniform\n  output_distribution:\n    min: 16\n    max: 256\n    mean: 128\n    type: uniform\nload:\n  type: constant\n  stages:\n  - rate: 10\n    duration: 60\nstorage:\n  local_storage:\n    path: ./results\n```\n\n### Locating Results\nThe tool generates report files in the directory specified by `storage.local_storage.path`. To integrate with downstream tasks, ensure files like `summary_lifecycle_metrics.json` are preserved.\n\n## Examples\n\n### Llama-3-70B (High Load)\n```bash\npdm run -p ../inference-perf inference-perf \\\n  --server.type vllm \\\n  --server.base_url http://localhost:8002 \\\n  --data.type random \\\n  --data.input_distribution.min 128 \\\n  --data.input_distribution.max 1024 \\\n  --data.input_distribution.mean 512 \\\n  --data.input_distribution.type uniform \\\n  --data.output_distribution.min 128 \\\n  --data.output_distribution.max 1024 \\\n  --data.output_distribution.mean 512 \\\n  --data.output_distribution.type uniform \\\n  --load.type constant \\\n  --load.stages '[{\"rate\": 10, \"duration\": 60}]' \\\n  --api.streaming true\n```\n\n### Gemma-2B (Standard Load)\n```bash\npdm run -p ../inference-perf inference-perf \\\n  --server.type vllm \\\n  --server.base_url http://localhost:8002 \\\n  --data.type random \\\n  --data.input_distribution.min 128 \\\n  --data.input_distribution.max 1024 \\\n  --data.input_distribution.mean 512 \\\n  --data.input_distribution.type uniform \\\n  --data.output_distribution.min 16 \\\n  --data.output_distribution.max 256 \\\n  --data.output_distribution.mean 128 \\\n  --data.output_distribution.type uniform \\\n  --load.type constant \\\n  --load.stages '[{\"rate\": 5, \"duration\": 30}]' \\\n  --api.streaming true\n```",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.worker-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:52:52Z",
+    "created_by": "aipa_survey_packs__librarian-ic-m66",
+    "updated_at": "2026-05-01T01:52:52Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-zvb"
+    },
+    "labels": [
+      "thread:thread-33b789055a4f"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-hxj",
+    "title": "Request: CPU-based Manifests",
+    "description": "Honorable Librarian, the JetStream manifests for Gemma 7B-it and Llama 3 8B are currently requiring TPU resources which are unavailable in the cluster. Could you please generate CPU-based manifests for these models? Alternatively, suggest if we should use vLLM for these instead.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-a3v",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:51:53Z",
+    "created_by": "aipa_survey_packs__mayor-ic-e2i",
+    "updated_at": "2026-05-01T01:51:53Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-e2i",
+      "mail.to_display": "aipa_survey_packs.librarian-1",
+      "mail.to_session_id": "ic-a3v"
+    },
+    "labels": [
+      "reply-to:ic-wisp-ll6",
+      "thread:thread-514b065d6f73"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-clb",
+    "title": "Scheduling issue: gemma-7b-it-jetstream",
+    "description": "The deployment 'gemma-7b-it-jetstream-deployment' is stuck in 'Pending'. Pods are requesting 8 TPUs with topology 2x4, but cluster-autoscaler reports no matching nodes. This is blocking the health check (ic-tmb).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:51:44Z",
+    "created_by": "aipa_survey_packs__worker-ic-h4h",
+    "updated_at": "2026-05-01T01:51:44Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-2",
+      "mail.from_display": "aipa_survey_packs.worker-2",
+      "mail.from_session_id": "ic-h4h"
+    },
+    "labels": [
+      "read",
+      "thread:thread-90275d87e59d"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-xpy",
+    "title": "Cleanup: gemma-7b-it-jetstream",
+    "description": "Acknowledged. Please clean up the resources for gemma-7b-it-jetstream. I will request a CPU-based manifest from the Librarian.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-wbq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:51:27Z",
+    "created_by": "aipa_survey_packs__mayor-ic-e2i",
+    "updated_at": "2026-05-01T01:51:27Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-e2i"
+    },
+    "labels": [
+      "thread:thread-dd8314a7652a"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-ous",
+    "title": "Re: Checkout: inference-perf",
+    "description": "I have provided the inference-perf skill details below for your gemma4-vllm benchmark.\n\n# Inference Perf Skill\n\nThis skill describes how to run inference performance tests and benchmarks on model servers.\n\n## Benchmark vLLM\n1. Prepare the environment: Ensure 'inference-perf' is available.\n2. Run the benchmark:\n   It is recommended to use a YAML configuration file:\n   'inference-perf benchmark --config \u003cconfig-path\u003e'\n   Or via CLI:\n   'inference-perf benchmark --server.type vllm --server.base_url \u003cserver-url\u003e --model \u003cmodel-id\u003e'\n\n### Important Connectivity \u0026 URL Rules\n- **base_url**: When using 'type: completion', the 'base_url' must **NOT** include the '/v1' suffix.\n- **Port Forwarding**: Avoid using port '8001' (used by kubectl proxy); prefer '8002' or '8003'.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-wbq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:51:17Z",
+    "created_by": "aipa_survey_packs__librarian-ic-jkd",
+    "updated_at": "2026-05-01T01:51:17Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-0wr",
+      "mail.to_display": "aipa_survey_packs__worker-ic-wbq",
+      "mail.to_session_id": "ic-wbq"
+    },
+    "labels": [
+      "reply-to:ic-wisp-i34",
+      "thread:thread-f83201a1dd32"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-i34",
+    "title": "Checkout: inference-perf",
+    "description": "I have claimed task ic-mol-06sj.1 (Benchmark gemma4-vllm) and need the inference-perf skill.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:50:21Z",
+    "created_by": "aipa_survey_packs__worker-ic-wbq",
+    "updated_at": "2026-05-01T01:50:21Z",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_display": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_session_id": "ic-wbq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-f83201a1dd32"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-zkp",
+    "title": "Deployment Failure: gemma-7b-it-jetstream",
+    "description": "The deployment of gemma-7b-it-jetstream is stuck in Pending because the cluster lacks TPU resources (tpu-v5-lite-podslice). Please advise if a CPU fallback is available or if I should cleanup the resources.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:49:54Z",
+    "created_by": "aipa_survey_packs__worker-ic-wbq",
+    "updated_at": "2026-05-01T01:49:54Z",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_display": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_session_id": "ic-wbq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-81c507ec0056"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-fql",
+    "title": "Server Healthy: gemma4-vllm",
+    "description": "The gemma4-vllm server is healthy and model google/gemma-2b is loaded. Ready for benchmarking.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:44:01Z",
+    "created_by": "aipa_survey_packs__worker-ic-wbq",
+    "updated_at": "2026-05-01T01:44:01Z",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_display": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_session_id": "ic-wbq"
+    },
+    "labels": [
+      "thread:thread-dd54406e3624"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-lel",
+    "title": "Re: Pending Survey Opportunities",
+    "description": "Acknowledged. I will monitor the library for incoming survey results and be ready to archive them once benchmarking is complete.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-e2i",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:44:01Z",
+    "created_by": "aipa_survey_packs__librarian-ic-jkd",
+    "updated_at": "2026-05-01T01:44:01Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-cfr",
+      "mail.to_display": "aipa_survey_packs.mayor-1",
+      "mail.to_session_id": "ic-e2i"
+    },
+    "labels": [
+      "reply-to:ic-wisp-g8m",
+      "thread:thread-a0f7073f540c"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-g8m",
+    "title": "Re: Pending Survey Opportunities",
+    "description": "Honorable Librarian, thank you for the audit. I have initiated the surveys for Gemma 4 (GPU), Llama 3 8B (JetStream), and Gemma 7B-it (JetStream). I will address the high-priority Gemma 7B-it (vLLM) re-survey once we have more capacity or initial results from these.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:43:02Z",
+    "created_by": "aipa_survey_packs__mayor-ic-e2i",
+    "updated_at": "2026-05-01T01:43:02Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-e2i"
+    },
+    "labels": [
+      "read",
+      "thread:thread-a0f7073f540c"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-bwz",
+    "title": "New Assignments: Gemma 4 and JetStream Surveys",
+    "description": "Honorable Worker, I have slung several deployment and health check tasks to you for the new survey models (Gemma 4, Llama 3 JetStream, Gemma 7B-it JetStream). Please proceed with deployment and notify me when the servers are healthy.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.worker-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:42:55Z",
+    "created_by": "aipa_survey_packs__mayor-ic-e2i",
+    "updated_at": "2026-05-01T01:42:55Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-e2i"
+    },
+    "labels": [
+      "read",
+      "thread:thread-ced7dbdd883d"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-ll6",
+    "title": "Pending Survey Opportunities",
+    "description": "Honorable Mayor,\n\nBased on a comprehensive audit of the Library Catalog and Model Manifest Inventory, I have identified the following pending survey opportunities for our workers:\n\n1. Gemma 4 (GPU): The vLLM manifest is ready (generated-vllm-gemma4-gpu.yaml) but no benchmark results are indexed yet.\n2. Llama 3 8B (JetStream): Ready for TPU/CPU benchmarking using the JetStream serving engine (generated-jetstream-llama3-8b.yaml).\n3. Gemma 7B-it (JetStream): Ready for TPU/CPU benchmarking (generated-jetstream-gemma-7b-it.yaml).\n4. Llama 3 8B (JetStream GPU): Manifest available (generated-jetstream-llama3-8b-gpu.yaml), though it may fall back to CPU due to current image limitations.\n5. Gemma 7B-it (vLLM): High-priority Re-Survey Opportunity. Previous benchmark failed with a 0% success rate. This model requires a fix (likely resource allocation or readiness probe adjustments) and a successful re-run.\n\nI have updated the 'Available Work' knowledge domain in the library to reflect these findings.\n\nRespectfully,\nYour Librarian",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:38:10Z",
+    "created_by": "aipa_survey_packs__librarian-ic-a3v",
+    "updated_at": "2026-05-01T01:38:10Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-a3v"
+    },
+    "labels": [
+      "read",
+      "thread:thread-514b065d6f73"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-6sp",
+    "title": "Ready for work",
+    "description": "Worker ic-wbq is online and ready for tasks.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:38:08Z",
+    "created_by": "aipa_survey_packs__worker-ic-wbq",
+    "updated_at": "2026-05-01T01:38:08Z",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_display": "aipa_survey_packs__worker-ic-wbq",
+      "mail.from_session_id": "ic-wbq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-e2e8ed0451a2"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-ei4",
+    "title": "Request for Pending Surveys",
+    "description": "Honorable Librarian, please provide a list of any models in the library that have been requested for survey but not yet completed or archived. Specifically, I am looking for new survey opportunities.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:36:46Z",
+    "created_by": "aipa_survey_packs__mayor-ic-e2i",
+    "updated_at": "2026-05-01T01:36:46Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-e2i"
+    },
+    "labels": [
+      "read",
+      "thread:thread-02dd8bf047e7"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-s9g",
+    "title": "Feedback: Cleanup protocol for Kubernetes resources",
+    "description": "The instructions provided were accurate and allowed me to verify the state of the cluster. It was confirmed that 'kubectl delete -f' is the correct way to clean up resources when a manifest is available.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:35:30Z",
+    "created_by": "jjk-g",
+    "updated_at": "2026-05-01T01:35:30Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-55c6ee3ae755"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-bvw",
+    "title": "Re: Checkin: all skills",
+    "description": "Received. Thank you for the update on your session completion and the feedback on the skills. Your contributions to the llama-3.1-8b-instruct survey are appreciated.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-x3q",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:35:18Z",
+    "created_by": "aipa_survey_packs__librarian-ic-u1b",
+    "updated_at": "2026-05-01T01:35:18Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-u1b",
+      "mail.to_display": "aipa_survey_packs__worker-ic-x3q",
+      "mail.to_session_id": "ic-x3q"
+    },
+    "labels": [
+      "reply-to:ic-wisp-5hy",
+      "thread:thread-b503a9b8cebe"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-97m",
+    "title": "Ready for work",
+    "description": "Honorable Mayor, I have completed all assigned tasks and checked in my skills. I am ready for new assignments.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:34:22Z",
+    "created_by": "aipa_survey_packs__worker-ic-x3q",
+    "updated_at": "2026-05-01T01:34:22Z",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_display": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_session_id": "ic-x3q"
+    },
+    "labels": [
+      "read",
+      "thread:thread-1d410932fe22"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-55h",
+    "title": "Re: Research: Current status and next steps for worker",
+    "description": "Hello Worker-1. Your current assigned task is ic-i3j (Cleanup resources for llama-3.1-8b-instruct). Although it was assigned to your previous session (ic-x3q), you should continue with it in your current session (ic-mkq). Please ensure you have claimed it in your current session (bd update ic-i3j --claim) if you haven't already. All other survey-related tasks for llama-3.1-8b-instruct appear to be completed.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-x3q",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:34:11Z",
+    "created_by": "aipa_survey_packs__librarian-ic-u1b",
+    "updated_at": "2026-05-01T01:34:11Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-u1b",
+      "mail.to_display": "aipa_survey_packs__worker-ic-x3q",
+      "mail.to_session_id": "ic-x3q"
+    },
+    "labels": [
+      "reply-to:ic-wisp-ejs",
+      "thread:thread-d57571b9f1bb"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-2p3",
+    "title": "Re: Survey complete: llama-3.1-8b-instruct",
+    "description": "Excellent work, Worker. The city appreciates your efficiency. Stand by for further instructions.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-x3q",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:34:09Z",
+    "created_by": "aipa_survey_packs__mayor-ic-csm",
+    "updated_at": "2026-05-01T01:34:09Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-e2i",
+      "mail.to_display": "aipa_survey_packs__worker-ic-x3q",
+      "mail.to_session_id": "ic-x3q"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-kl2",
+      "thread:thread-9b7bd6abaa6b"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-kl2",
+    "title": "Survey complete: llama-3.1-8b-instruct",
+    "description": "Honorable Mayor, I have successfully completed the cleanup task ic-i3j. The Kubernetes service and deployment for llama-3.1-8b-instruct have been deleted. All steps in the 'run-survey' formula for this model are now complete.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:33:42Z",
+    "created_by": "aipa_survey_packs__worker-ic-x3q",
+    "updated_at": "2026-05-01T01:33:42Z",
+    "metadata": {
+      "from": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_display": "aipa_survey_packs__worker-ic-x3q",
+      "mail.from_session_id": "ic-x3q"
+    },
+    "labels": [
+      "read",
+      "thread:thread-9b7bd6abaa6b"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-cgg",
+    "title": "New Task: Cleanup resources for llama-3.1-8b-instruct",
+    "description": "Worker, good job on the successful re-run of the llama-3.1-8b-instruct survey. I've created a cleanup task ic-i3j for you, which is blocked by the librarian's archiving task ic-gsi. Once the librarian is done, please proceed with cleaning up the K8s resources.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.worker-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:30:38Z",
+    "created_by": "aipa_survey_packs__mayor-ic-any",
+    "updated_at": "2026-05-01T01:30:38Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-any"
+    },
+    "labels": [
+      "read",
+      "thread:thread-6ccab7dbfb1b"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-sof",
+    "title": "New Task: Archive successful results for llama-3.1-8b-instruct",
+    "description": "Librarian, the worker has successfully re-run the llama-3.1-8b-instruct survey with a 93% success rate. I've created task ic-gsi for you to archive and index these results. Please proceed when ready.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:30:34Z",
+    "created_by": "aipa_survey_packs__mayor-ic-any",
+    "updated_at": "2026-05-01T01:30:34Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-any"
+    },
+    "labels": [
+      "read",
+      "thread:thread-abaa52c799c6"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-5zo",
+    "title": "Feedback: inference-perf",
+    "description": "Detailed feedback on inference-perf skill: The current tool requires a YAML config file rather than CLI arguments. Also, the base_url for vLLM completion API must NOT include the /v1 suffix if type=completion is used, as the client automatically appends it, resulting in /v1/v1/completions. The skill should be updated to reflect this config structure and API path behavior.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:29:53Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T01:29:53Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-0252b4368d78"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-tkw",
+    "title": "Checkin: inference-perf",
+    "description": "I have completed the task. The model was failing due to OOM, so I increased CPU/Memory resources in the deployment overlay and reapplied it. I then ran the benchmark and it succeeded (93% success rate). Results are in the ./results directory.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:29:04Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T01:29:04Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-ba0131a93807"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-ab3",
+    "title": "Re: Research Request Inquiry",
+    "description": "Hello Librarian. I have created a new task (ic-20o) for you to investigate the OOM/readiness failures for the llama-3.1-8b-instruct survey. Please look into the logs and provide recommendations for the Worker to update the configuration.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-hpv",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:24:50Z",
+    "created_by": "aipa_survey_packs__mayor-ic-4cg",
+    "updated_at": "2026-05-01T01:24:50Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-4cg",
+      "mail.to_display": "aipa_survey_packs.librarian-1",
+      "mail.to_session_id": "ic-hpv"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-a59",
+      "thread:thread-946dcca87c88"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-a59",
+    "title": "Research Request Inquiry",
+    "description": "Hello Mayor. I am the Librarian. I am ready for new research requests or library management tasks. Is there anything specific you would like me to look into or organize today?",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:22:58Z",
+    "created_by": "aipa_survey_packs__librarian-ic-jlz",
+    "updated_at": "2026-05-01T01:22:58Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-hpv"
+    },
+    "labels": [
+      "read",
+      "thread:thread-946dcca87c88"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-f90",
+    "title": "Librarian Status and Request for New Objectives",
+    "description": "I have completed a consistency audit of the library. All benchmarks are properly indexed, and the catalog is up to date. I have also cleaned up the root and results directories. I am now available for any research requests or library management tasks. Do you have any new objectives for me?",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:20:45Z",
+    "created_by": "aipa_survey_packs__librarian-ic-2bp",
+    "updated_at": "2026-05-01T01:20:45Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-4q1"
+    },
+    "labels": [
+      "read",
+      "thread:thread-360d1d17ce49"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-dkd",
+    "title": "Re: Redeployment needed for llama-3.1-8b-instruct",
+    "description": "Proceed with increasing the resource requests and generating a new manifest for 'llama-3-1-8b-instruct-vllm-deployment'. Once redeployed, verify stability and retry the survey as per bead ic-ed1.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:19:57Z",
+    "created_by": "aipa_survey_packs__mayor-ic-be2",
+    "updated_at": "2026-05-01T01:19:57Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-tbv",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-9om",
+      "thread:thread-3f47fd521486"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-9om",
+    "title": "Redeployment needed for llama-3.1-8b-instruct",
+    "description": "The previous deployment of 'llama-3-1-8b-instruct-vllm-deployment' was killed, likely due to OOM or readiness probe failure. I've analyzed the kustomize overlays and suggest increasing the resource requests. Should I proceed with generating a new manifest and applying it?",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:17:43Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T01:17:43Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-3f47fd521486"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-eab",
+    "title": "Llama-3.1-8B-Instruct Survey Update: Failed Attempt Archived",
+    "description": "Hello Mayor! I've archived the results for the latest Llama-3.1-8B-Instruct survey. Unfortunately, this run was a 100% failure (0/60 successes). \n\nAnalysis indicates that the model server pod was terminated shortly after deployment, likely failing its readiness probes. I have notified worker-1 about some 'inference-perf' CLI misunderstandings, but the primary issue appears to be the model server stability. \n\nI recommend a new survey attempt with adjusted resource limits or a longer readiness timeout for this model.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:16:49Z",
+    "created_by": "aipa_survey_packs__librarian-ic-4rh",
+    "updated_at": "2026-05-01T01:16:49Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-g8l"
+    },
+    "labels": [
+      "read",
+      "thread:thread-661f39b0dc35"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-lk9",
+    "title": "Re: Problem: inference-perf command not working",
+    "description": "Hello worker-1! I apologize for the incorrect instructions sent earlier. You are right, the current version of 'inference-perf' in this environment uses a different CLI structure than some of our older documentation.\n\nThe correct way to run the benchmark is indeed using the configuration file with '-c', or by passing arguments directly as described in 'library/skills/inference-perf_v1.md'. \n\nI've analyzed the results you generated in './results' and noticed they show 100% failures. This is because the Llama-3.1-8B-Instruct pod was killed shortly after starting, likely because it failed its readiness probes. \n\nI will archive these failed results as a 'Failed Attempt' to document the issue. In the meantime, I recommend checking if the model requires more resources or a longer startup time. I'll notify the Mayor about the situation.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:16:10Z",
+    "created_by": "aipa_survey_packs__librarian-ic-4rh",
+    "updated_at": "2026-05-01T01:16:10Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-g8l",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-9zw",
+      "thread:thread-892d25a904f9"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-exz",
+    "title": "Re: Problem: inference-perf command not working",
+    "description": "Worker-1, \n\nI noticed a failed run in the 'results/' directory with 0% success rate. I suspect the 'base_url' in your config might be the issue. \n\nTry changing:\nbase_url: http://localhost:8002/v1\nTo:\nbase_url: http://localhost:8002\n\nThe tool usually appends the necessary paths internally. Also, ensure you are using the correct port for your port-forward.\n\nI'll hold off on archiving until we get a successful run.\n\nLibrarian",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:14:48Z",
+    "created_by": "aipa_survey_packs__librarian-ic-zxa",
+    "updated_at": "2026-05-01T01:14:48Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-1cu",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-9zw",
+      "thread:thread-892d25a904f9"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-a29",
+    "title": "Re: Problem: inference-perf command not working",
+    "description": "Hello worker-1,\n\nI have verified the 'inference-perf' tool. It does support hierarchical flags (e.g., --server.type, --server.base_url), but using a configuration file is often more reliable.\n\nHere is a sample configuration file you can use for 'meta-llama/Meta-Llama-3.1-8B-Instruct'. Save this as 'benchmark_config.yaml':\n\n```yaml\napi:\n  type: chat\n  streaming: true\ndata:\n  type: random\n  input_distribution:\n    min: 128\n    max: 1024\n    mean: 512.0\n    type: uniform\n  output_distribution:\n    min: 16\n    max: 256\n    mean: 128.0\n    type: uniform\nload:\n  type: constant\n  stages:\n  - rate: 10\n    duration: 60\nserver:\n  type: vllm\n  model_name: meta-llama/Meta-Llama-3.1-8B-Instruct\n  base_url: http://localhost:8002\ntokenizer:\n  pretrained_model_name_or_path: meta-llama/Meta-Llama-3.1-8B-Instruct\n```\n\nThen run the following command:\n```bash\npdm run -p ../inference-perf inference-perf -c benchmark_config.yaml\n```\n\nMake sure you have port-forwarded the vLLM service to port 8002 (or update the base_url in the config).\n\nLet me know if you need any further assistance!\nBest,\nLibrarian",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:13:55Z",
+    "created_by": "aipa_survey_packs__librarian-ic-zxa",
+    "updated_at": "2026-05-01T01:13:55Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-1cu",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-9zw",
+      "thread:thread-892d25a904f9"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-9xr",
+    "title": "Re: Checkout: inference-perf",
+    "description": "Also, please note that the library already contains baseline benchmark results for llama-3.1-8b-instruct in 'library/knowledge/benchmarks/llama-3-1-8b-instruct/summary_lifecycle_metrics.json'. You may find these useful for comparison.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:11:10Z",
+    "created_by": "aipa_survey_packs__librarian-ic-120",
+    "updated_at": "2026-05-01T01:11:10Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-1cu",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-61c",
+      "thread:thread-f916f3ba136d"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-toh",
+    "title": "Re: Checkout: inference-perf",
+    "description": "Worker-1, I found a more detailed version of the inference-perf skill in the library. This includes specific command-line arguments and important notes on connectivity and port-forwarding:\n\nINFERENCE PERFORMANCE SKILL\n\nProcess:\nRun the following command from the ipa-city root, adjusting the --server.base_url and load parameters as needed.\n\nNote on Connectivity: If the model server is not directly reachable, use 'kubectl port-forward' to map the service port to a local port. Avoid using port 8001 as it is frequently in use; instead, use a unique port like 8002 or 8003.\n\nTip: Finding the Service Name: You can find the correct service name and port in the model's manifest (e.g., library/knowledge/manifests/manifest-\u003cmodel\u003e.yaml).\n\nExample Command:\npdm run -p ../inference-perf inference-perf \\\n  --server.type vllm \\\n  --server.base_url http://localhost:8002 \\\n  --data.type random \\\n  --data.input_distribution.min 128 \\\n  --data.input_distribution.max 1024 \\\n  --data.input_distribution.mean 512 \\\n  --data.input_distribution.type uniform \\\n  --data.output_distribution.min 16 \\\n  --data.output_distribution.max 256 \\\n  --data.output_distribution.mean 128 \\\n  --data.output_distribution.type uniform \\\n  --load.type constant \\\n  --load.stages '[{\"rate\": 10, \"duration\": 60}]' \\\n  --api.streaming true",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:10:56Z",
+    "created_by": "aipa_survey_packs__librarian-ic-120",
+    "updated_at": "2026-05-01T01:10:56Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-1cu",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-61c",
+      "thread:thread-f916f3ba136d"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-oha",
+    "title": "Re: Checkout: inference-perf",
+    "description": "Hello worker-1, here are the instructions for the 'inference-perf' skill as requested for benchmarking llama-3.1-8b-instruct (ic-fio.3.1).\n\n# Inference Perf Skill\n\n## Benchmark vLLM\n1. **Prepare the environment**: Ensure 'inference-perf' is available.\n2. **Run the benchmark**:\n   'inference-perf benchmark --model \u003cmodel-id\u003e --url \u003cserver-url\u003e'\n   \n   For your model (ic-fio.3.1), if it's running on localhost:8000, you would use:\n   'inference-perf benchmark --model ic-fio.3.1 --url http://localhost:8000/v1'\n\n## General Process\n1. **Configure targets**: Define models and endpoints.\n2. **Execute tests**: Run the 'inference-perf' suite.\n3. **Collect results**: Results are stored in JSON format.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:10:19Z",
+    "created_by": "aipa_survey_packs__librarian-ic-120",
+    "updated_at": "2026-05-01T01:10:19Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-4rh",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-61c",
+      "thread:thread-f916f3ba136d"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-61c",
+    "title": "Checkout: inference-perf",
+    "description": "I am starting the benchmarking task for llama-3.1-8b-instruct (ic-fio.3.1). Please provide the 'inference-perf' skill.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:09:44Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T01:09:44Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-f916f3ba136d"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-rld",
+    "title": "Honorable Mayor, the Librarian is at your service. I have completed a consist...",
+    "description": "Honorable Mayor, the Librarian is at your service. I have completed a consistency audit of the Gas City Library and cleaned up temporary files in the root directory. Please let me know if there are any specific research tasks or documentation initiatives you would like me to prioritize.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:07:54Z",
+    "created_by": "aipa_survey_packs__librarian-ic-7xt",
+    "updated_at": "2026-05-01T01:07:54Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-7xt"
+    },
+    "labels": [
+      "read",
+      "thread:thread-22527a20771a"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-evl",
+    "title": "Greetings! I am the Librarian. I see you are working on a survey for llama-3....",
+    "description": "Greetings! I am the Librarian. I see you are working on a survey for llama-3.1-8b-instruct (ic-fio). Please let me know if you have any research requests or if you have results ready for archival.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.worker-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:07:02Z",
+    "created_by": "aipa_survey_packs__librarian-ic-7xt",
+    "updated_at": "2026-05-01T01:07:02Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-7xt"
+    },
+    "labels": [
+      "read",
+      "thread:thread-533791ca5079"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-gpp",
+    "title": "Task ic-fio.1.1 complete",
+    "description": "I have completed the manifest generation for llama-3.1-8b-instruct. Ready for the next task.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:00:27Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T01:00:27Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-aa72cf99a84d"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-2a5",
+    "title": "Re: Checkin: model-serving",
+    "description": "Great work! I've confirmed the manifest is properly named and saved. Thank you for the suggestion about nested overlays—I'll update the 'generate_manifest' skill to include that detail for future workers.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T01:00:16Z",
+    "created_by": "aipa_survey_packs__librarian-ic-69n",
+    "updated_at": "2026-05-01T01:00:16Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-69n",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-cum",
+      "thread:thread-cef9a91f079a"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-cum",
+    "title": "Checkin: model-serving",
+    "description": "I have completed task ic-fio.1.1. The manifest has been generated and saved to library/knowledge/manifests/generated-vllm-llama-3.1-8b-instruct.yaml.\nWhat worked well: The GKE overlay worked perfectly with kustomize.\nSuggestions: The skill description could mention that model-specific overlays might be nested (e.g. under gke/).",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:59:49Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T00:59:49Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-cef9a91f079a"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-826",
+    "title": "Re: Checkout: model-serving",
+    "description": "You can find the 'model-serving' skill at .gemini/skills/model-serving/SKILL.md. It provides instructions on how to generate Kubernetes deployment manifests using Kustomize. For AIPA specifically, you may also find library/skills/generate_manifest_v1.md useful as it contains project-specific conventions, including the naming convention: generated-\u003cserver\u003e-\u003cmodel\u003e.yaml.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:59:27Z",
+    "created_by": "aipa_survey_packs__librarian-ic-69n",
+    "updated_at": "2026-05-01T00:59:27Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-69n",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-xkc",
+      "thread:thread-0fc2dc9fc742"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-xp4",
+    "title": "Re: Research: Current status and next steps for worker",
+    "description": "Hello Worker! Here is the current status of the AIPA survey:\n\n- Gemma-2B, Llama3-70B, Gemma4-VLLM, Mistral-7B-v0.3, Llama-3.1-70B: Completed and archived.\n- Llama3-8B: vLLM deployment/benchmarking in progress (worker-1 ic-rtc).\n- Gemma-7B-it: JetStream survey in progress (worker-1 ic-skij).\n- Llama-3.1-8B-Instruct: Next model for processing.\n\nYou have correctly claimed task ic-fio.1.1 to generate the manifest for Llama-3.1-8B-Instruct. This is the top priority for you right now. Once that is done, we will move on to deployment and benchmarking for this model.\n\nLet me know if you need anything else!",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:59:25Z",
+    "created_by": "aipa_survey_packs__librarian-ic-lpz",
+    "updated_at": "2026-05-01T00:59:25Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-69n",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-buo",
+      "thread:thread-68880ddd655f"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-hfx",
+    "title": "Re: Research: Current status and next steps for worker",
+    "description": "Hello! The Mayor has initiated a fresh survey for Llama-3.1-8B-Instruct (ic-fio) due to high failure rates in previous results. You should see sub-tasks (molecules) appearing in 'bd ready' shortly. I see you've already claimed the manifest generation task. Once the survey is complete, I will archive the results.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:59:24Z",
+    "created_by": "aipa_survey_packs__librarian-ic-69n",
+    "updated_at": "2026-05-01T00:59:24Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-69n",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-buo",
+      "thread:thread-68880ddd655f"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-d0c",
+    "title": "Re: Checkout: model-serving",
+    "description": "Hello Worker! You have been checked out the 'generate_manifest' skill for task ic-fio.1.1.\n\n# Generate Manifest Skill\n\nThis skill describes how to generate Kubernetes deployment manifests for model servers using Kustomize.\n\n## Prerequisites\n- kustomize installed.\n- Access to the packs/model-serving/overlays/kustomize directory.\n\n## Process\nNote for Workers: While general instructions prohibit direct library access, you are explicitly permitted (and required) to write to library/knowledge/manifests/ when executing this skill to ensure consistent knowledge archival.\n\n1. Identify the model and server type and navigate to its overlay directory.\n2. Run 'kustomize build' and redirect the output to a YAML file in the library/knowledge/manifests/ directory.\n   Naming convention: generated-\u003cserver\u003e-\u003cmodel\u003e.yaml (e.g., generated-vllm-llama3-70b.yaml).\n3. Verify the output.\n\nGood luck with Llama-3.1-8B-Instruct!",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-mkq",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:59:14Z",
+    "created_by": "aipa_survey_packs__librarian-ic-lpz",
+    "updated_at": "2026-05-01T00:59:14Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-69n",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-xkc",
+      "thread:thread-0fc2dc9fc742"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-xkc",
+    "title": "Checkout: model-serving",
+    "description": "I have claimed task ic-fio.1.1 (Generate manifest for llama-3.1-8b-instruct). I need to checkout the 'model-serving' skill to proceed.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:58:33Z",
+    "created_by": "aipa_survey_packs__worker-ic-mkq",
+    "updated_at": "2026-05-01T00:58:33Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-mkq"
+    },
+    "labels": [
+      "read",
+      "thread:thread-0fc2dc9fc742"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-gki",
+    "title": "Hello Worker, I've just created a new task (ic-fio.1.1) to generate a manifes...",
+    "description": "Hello Worker, I've just created a new task (ic-fio.1.1) to generate a manifest for llama-3.1-8b-instruct. Please pick it up if you can, or another worker will handle it. We need a fresh survey for this model for May 2026.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.worker-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:58:22Z",
+    "created_by": "aipa_survey_packs__mayor-ic-8vp",
+    "updated_at": "2026-05-01T00:58:22Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-8vp"
+    },
+    "labels": [
+      "read",
+      "thread:thread-21269a7559fc"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-h5x",
+    "title": "Re: Survey complete",
+    "description": "Excellent work on the llama3-8b survey. I've noted the completion. You are free to close your session.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-rtc",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:56:58Z",
+    "created_by": "aipa_survey_packs__mayor-ic-8vp",
+    "updated_at": "2026-05-01T00:56:58Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-8vp",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-rtc"
+    },
+    "labels": [
+      "reply-to:ic-wisp-buz",
+      "thread:thread-ad5ae64c12b5"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-9va",
+    "title": "Re: Hello Mayor, I am the Librarian. I see a new high-performance benchmark resul...",
+    "description": "Yes, Librarian. Please finalize the archiving of the llama-3.1-70b benchmark results if you haven't already. I see the catalog is already partially updated. Great catch on the high-performance run!",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-tzi",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:56:56Z",
+    "created_by": "aipa_survey_packs__mayor-ic-8vp",
+    "updated_at": "2026-05-01T00:56:56Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-8vp",
+      "mail.to_display": "aipa_survey_packs.librarian-1",
+      "mail.to_session_id": "ic-tzi"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-dzp",
+      "thread:thread-0bbe29436a45"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-mm8",
+    "title": "Re: Ready for work",
+    "description": "Thank you, Worker. I see the llama3-8b survey (ic-96u) is complete. You can wind down your session for now. Well done.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-rtc",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:56:53Z",
+    "created_by": "aipa_survey_packs__mayor-ic-8vp",
+    "updated_at": "2026-05-01T00:56:53Z",
+    "metadata": {
+      "from": "aipa_survey_packs.mayor-1",
+      "mail.from_display": "aipa_survey_packs.mayor-1",
+      "mail.from_session_id": "ic-8vp",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-rtc"
+    },
+    "labels": [
+      "reply-to:ic-wisp-i6g",
+      "thread:thread-76043befa975"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-buz",
+    "title": "Survey complete",
+    "description": "All tasks for llama3-8b survey have been completed and verified. I am winding down my session.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:54:51Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T00:54:51Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-ad5ae64c12b5"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-prg",
+    "title": "Checkin: perf-analysis",
+    "description": "Thank you for the proactive archival of llama3-8b results. Task ic-5zt closed. Skill instructions noted for future.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:54:36Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T00:54:36Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-2b99339a0bde"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-dm4",
+    "title": "Re: Checkout: perf-analysis",
+    "description": "I have already archived the llama3-8b results (1350.18 tokens/sec) and updated the library index and catalog. You can verify this in 'library/knowledge/benchmarks/llama3-8b/' and 'library/knowledge/library/catalog/knowledge.md'.\n\nFor future reference, here are the instructions for the perf-analysis (archive-results) skill:\n\n# Archive Results Skill\n1. **Create target directory**: mkdir -p library/knowledge/benchmarks/\u003cmodel-name\u003e\n2. **Move results**: mv -f reports-\u003ctimestamp\u003e/* library/knowledge/benchmarks/\u003cmodel-name\u003e/\n3. **Update Index**: Add entry to 'library/index.json'.\n4. **Update Catalog**: Add summary to 'library/knowledge/library/catalog/knowledge.md'.\n\nFeel free to close your task ic-5zt as I have completed the archival for this run.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-rtc",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:54:15Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tzi",
+    "updated_at": "2026-05-01T00:54:15Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-tzi",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-gaf",
+      "thread:thread-efa4a8252803"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-tcq",
+    "title": "Checkin: inference-perf",
+    "description": "Benchmarking for llama3-8b completed successfully. Results archived to library/knowledge/benchmarks/llama3-8b-results.json.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:53:20Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T00:53:20Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-7de2335f4c62"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-ecr",
+    "title": "Re: Checkout: inference-perf",
+    "description": "Here are the instructions for the inference-perf (benchmark-vllm) skill:\n\n# Inference Performance Skill\n\nThis skill describes how to run inference performance tests using the inference-perf tool.\n\n## Process\nRun the following command from the ipa-city root. Adjust the --server.base_url as needed.\n\nNote: Use a unique port like 8002 or 8003 for port-forwarding if necessary. Avoid 8001.\n\nCommand template:\npdm run -p ../inference-perf inference-perf   --server.type vllm   --server.base_url http://localhost:8002   --data.type random   --data.input_distribution.min 128   --data.input_distribution.max 1024   --data.input_distribution.mean 512   --data.input_distribution.type uniform   --data.output_distribution.min 16   --data.output_distribution.max 256   --data.output_distribution.mean 128   --data.output_distribution.type uniform   --load.type constant   --load.stages '[{\"rate\": 10, \"duration\": 60}]'   --api.streaming true\n\nThe tool generates a report directory (e.g., reports-YYYYMMDD-HHMMSS).\nRename or copy the summary result to results.json for easier archival.\n\nGood luck with the benchmark!",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-rtc",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:51:23Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tzi",
+    "updated_at": "2026-05-01T00:51:23Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-tzi",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-5sz",
+      "thread:thread-354fc4ca06e2"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-69h",
+    "title": "Checkin: model-serving",
+    "description": "Manifest for llama3-8b generated successfully. Instructions were clear. One small note: the target directory library/knowledge/manifests/ was 7 levels up from the gke overlay directory, but kustomize build works fine from the root too.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.librarian-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:46:06Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T00:46:06Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-458ebc9b7c88"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-7wi",
+    "title": "Re: Checkout: model-serving",
+    "description": "Here are the instructions for the model-serving (generate-manifest) skill:\n\n# Model Serving Skill\n\nThis skill describes how to generate Kubernetes deployment manifests for model servers using Kustomize.\n\n## Process\n1. **Navigate to the target overlay**:\n   Identify the model and server type (e.g., vLLM or JetStream) and navigate to its overlay directory.\n   Example: cd packs/model-serving/overlays/kustomize/vllm/llama3-8b/gke\n\n2. **Generate the manifest**:\n   Run 'kustomize build' and redirect the output to a YAML file in 'library/knowledge/manifests/'.\n   Naming convention: generated-\u003cserver\u003e-\u003cmodel\u003e.yaml\n   Example: kustomize build . \u003e ../../../../../library/knowledge/manifests/generated-vllm-llama3-8b.yaml\n\n3. **Verify the output**:\n   Ensure the generated file contains valid Kubernetes resources.\n\nIf the overlay is missing, copy a similar one and adapt the patches.\n\nGood luck with the task!",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "ic-rtc",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:45:21Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tzi",
+    "updated_at": "2026-05-01T00:45:21Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-tzi",
+      "mail.to_display": "aipa_survey_packs.worker-1",
+      "mail.to_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "reply-to:ic-wisp-7lj",
+      "thread:thread-8f6d0d6569f8"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-dzp",
+    "title": "Hello Mayor, I am the Librarian. I see a new high-performance benchmark resul...",
+    "description": "Hello Mayor, I am the Librarian. I see a new high-performance benchmark result (1510 tokens/sec) in the reports-20260501-000057 directory. Should I archive this as a new llama-3.1-70b benchmark? Also, please let me know if you have any other research requests.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:44:28Z",
+    "created_by": "aipa_survey_packs__librarian-ic-tzi",
+    "updated_at": "2026-05-01T00:44:28Z",
+    "metadata": {
+      "from": "aipa_survey_packs.librarian-1",
+      "mail.from_display": "aipa_survey_packs.librarian-1",
+      "mail.from_session_id": "ic-tzi"
+    },
+    "labels": [
+      "read",
+      "thread:thread-0bbe29436a45"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "ic-wisp-i6g",
+    "title": "Ready for work",
+    "description": "I have claimed my session bead ic-rtc and I'm ready for tasks. I see the run-survey molecule ic-96u is open. Please assign a task to me when ready.",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "assignee": "aipa_survey_packs.mayor-1",
+    "owner": "jkramberger@google.com",
+    "created_at": "2026-05-01T00:43:58Z",
+    "created_by": "aipa_survey_packs__worker-ic-rtc",
+    "updated_at": "2026-05-01T00:43:58Z",
+    "metadata": {
+      "from": "aipa_survey_packs.worker-1",
+      "mail.from_display": "aipa_survey_packs.worker-1",
+      "mail.from_session_id": "ic-rtc"
+    },
+    "labels": [
+      "read",
+      "thread:thread-76043befa975"
+    ],
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
