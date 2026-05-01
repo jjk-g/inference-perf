@@ -1,0 +1,51 @@
+- Fulfilled Skill Checkout: model-serving for ic-wisp-12y
+- Fulfilled Research Request: ic-mol-hx4p.3 for ic-wisp-1nje
+- Fulfilled Research Request: ic-mol-hx4p.1 for ic-wisp-1pvv
+- Fulfilled Research Request: Current status and next steps for worker for ic-wisp-3kh
+- Fulfilled Research Request: ic-mol-veq6.2 for ic-wisp-3pi
+- Fulfilled Research Request: library/knowledge/manifests/generated-vllm-gemma4-gpu.yaml for ic-wisp-3vb3
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-3vli
+- Fulfilled Research Request: K8s Deployment Skill for ic-wisp-4awo
+- Fulfilled Research Request: gemma-7b-it-jetstream deployment for ic-wisp-4e9n
+- Fulfilled Skill Checkout: inference-perf for ic-wisp-4pb
+- Fulfilled Research Request: Current status and next steps for worker for ic-wisp-55h
+- Fulfilled Research Request: library/knowledge/manifests/generated-vllm-gemma4-gpu.yaml for ic-wisp-69x2
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-79ip
+- Fulfilled Skill Checkout: model-serving for ic-wisp-7wi
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-88uy
+- Fulfilled Research Request: Benchmark JetStream for ic-wisp-8bm
+- Fulfilled Skill Checkout: apply_manifest for ic-wisp-8t7q
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-9hww
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-aazx
+- Fulfilled Research Request: How to interpret task title ic-mol-hx4p.2 and which skill to checkout for ic-wisp-andi
+- Fulfilled Skill Checkout: model-serving for ic-wisp-ayqg
+- Fulfilled Research Request: ic-mol-veq6.2 for ic-wisp-bzn
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-ch89
+- Fulfilled Research Request: ic-mol-12w6.1 for ic-wisp-d6t
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-derr
+- Fulfilled Skill Checkout: perf-analysis for ic-wisp-dm4
+- Fulfilled Skill Checkout: apply_manifest_v1 for ic-wisp-dq5e
+- Fulfilled Skill Checkout: inference-perf for ic-wisp-ecr
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-eqdu
+- Fulfilled Skill Checkout: perf-analysis for ic-wisp-famn
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-fh6i
+- Fulfilled Research Request: K8s Deployment Skill for ic-wisp-grcx
+- Fulfilled Research Request: Current status and next steps for worker for ic-wisp-hfx
+- Fulfilled Research Request: ic-mol-hx4p.3 for ic-wisp-hg49
+- Fulfilled Skill Checkout: apply_manifest for ic-wisp-i10p
+- Fulfilled Skill Checkout: model-serving for ic-wisp-il7v
+- Fulfilled Research Request: ic-mol-veq6.1 for ic-wisp-j0r
+- Fulfilled Research Request: ic-mol-hx4p.1 for ic-wisp-kmgw
+- Fulfilled Research Request: How to interpret task title ic-mol-hx4p.2 and which skill to checkout for ic-wisp-lpvc
+- Fulfilled Skill Checkout: apply_manifest for ic-wisp-lsa
+- Fulfilled Research Request: K8s Deployment Skill for ic-wisp-o2t6
+- Fulfilled Research Request: ic-mol-xhpi.1 for ic-wisp-owyu
+- Fulfilled Research Request: gemma-7b-it-jetstream deployment for ic-wisp-qcjp
+- Fulfilled Research Request: library/knowledge/manifests/generated-vllm-gemma4-gpu.yaml for ic-wisp-qy06
+- Fulfilled Research Request: ic-mol-xhpi.1 for ic-wisp-r429
+- Fulfilled Skill Checkout: inference-perf for ic-wisp-swg
+- Fulfilled Skill Checkout: generate-manifest for ic-wisp-t68l
+- Fulfilled Skill Checkout: apply_manifest for ic-wisp-tcc
+- Fulfilled Research Request: Current status and next steps for worker for ic-wisp-xp4
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-yqds
+- Fulfilled Skill Checkout: k8s-deploy for ic-wisp-yx6z

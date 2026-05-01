@@ -47,6 +47,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Fulfilled 51 pending research and skill checkout requests from workers (including skills: k8s-deploy, inference-perf, apply_manifest, perf-analysis, model-serving, generate-manifest, and various research topics).
 - **2026-05-01**: Fulfilled research requests for 'k8s-deploy' skill (Apply Manifest, Wait Healthy, Cleanup Resources) and provided JetStream benchmarking guidance (using 'server.type: vllm' and 'jetstream-http' proxy) to resolve worker connectivity issues. Processed positive feedback on 'k8s-deploy' health check procedures. Updated 'work/available' with latest survey status.
 - **2026-05-01**: Archived and indexed 'gemma4-gpu' benchmark results (98.3% success rate, 143.24 tokens/sec). Updated library index and catalog. Performed library consistency audit and root directory cleanup, moving stray log and configuration files to 'archive/'.
 - **2026-05-01**: Updated `k8s-deploy` skill based on feedback from `worker-2` and `worker-3`. Added a proactive secret verification step (`kubectl get secret hf-secret`) to the 'Apply Manifest' process and clarified that the `kubectl proxy` method is recommended for reliable health checks. Synchronized updates across all library skill files and the active skill pack.
