@@ -57,6 +57,8 @@ spec:
         env:
         - name: TENSOR_PARALLEL_SIZE
           value: "1"
+        - name: JAX_PLATFORMS
+          value: "cpu"
         image: us-docker.pkg.dev/cloud-tpu-images/inference/maxengine-server:v0.2.2
         name: inference-server
         ports:
