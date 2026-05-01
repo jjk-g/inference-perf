@@ -20,14 +20,14 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Knowledge Domains
 
-- **benchmarks/gemma-7b-it**: Performance results and metrics for the gemma-7b-it model deployment.
-- **benchmarks/gemma-2b**: Performance results and metrics for the gemma-2b model deployment.
+- **benchmarks/gemma-7b-it**: Performance results for gemma-7b-it. Benchmark failed with 0% success rate (0/60 requests).
+- **benchmarks/gemma-2b**: Performance results for gemma-2b. Achieved 4592.15 output tokens/sec with a 94.0% success rate (564/600 requests).
 - **benchmarks/gemma4-vllm**: Performance results for gemma4-vllm. Achieved 6294.37 total tokens/sec with a 95.2% success rate (571/600 requests).
 - **benchmarks/llama3-8b**: Performance results for llama3-8b. Achieved 1350.18 output tokens/sec with 0 failures (600/600 requests). Survey run on 2026-05-01.
 - **benchmarks/llama3-8b-gpu**: (Pending) Deployment configuration for JetStream on GPUs.
-- **benchmarks/llama3-70b**: Performance results and metrics for the llama3-70b model deployment.
+- **benchmarks/llama3-70b**: Performance results for llama3-70b. Achieved 185.88 output tokens/sec with a 91.7% success rate (55/60 requests).
 - **benchmarks/llama-3.1-70b**: Performance results for Llama-3.1-70B. Achieved 1510.63 output tokens/sec with 0 failures (600/600 requests).
-- **benchmarks/llama-3-1-8b-instruct**: Performance results and metrics for the Llama 3.1 8B Instruct model.
+- **benchmarks/llama-3-1-8b-instruct**: Performance results for Llama 3.1 8B Instruct. Achieved 1135.81 output tokens/sec with an 88.5% success rate (531/600 requests).
 - **benchmarks/mistral-7b-v0.3**: Performance results for Mistral-7B-v0.3. Achieved 299.68 output tokens/sec with a 1.67% failure rate (1/60 requests). Survey run on 2026-05-01.
 - **aipa/workflow**: Overview of the Agentic Inference Profile Automation lifecycle.
 - **aipa/manifest-generation**: Technical details and knowledge about manifest generation processes.
@@ -44,6 +44,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Performed library consistency audit. Verified that all indexed benchmarks exist and match the manifest inventory. Updated catalog with missing performance metrics for Gemma 2B, Gemma 7B-it, Llama 3 70B, and Llama 3.1 8B Instruct.
 - **2026-05-01**: Provided updated `inference-perf` skill to `worker-1` with detailed `pdm` commands, connectivity tips (avoiding port 8001), and pointed to baseline benchmark results for comparison.
 - **2026-05-01**: Performed library consistency audit. Cleaned up temporary `port-forward-*.log` files and stray benchmark configs from the root directory. Updated manifest inventory in `library/knowledge/aipa/manifests.md` to remove non-existent legacy entries.
 - **2026-05-01**: Updated `generate_manifest` skill based on worker feedback to clarify navigation into environment-specific subdirectories (e.g., `gke/`).
