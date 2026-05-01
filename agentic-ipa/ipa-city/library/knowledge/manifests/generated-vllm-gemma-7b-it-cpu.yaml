@@ -39,8 +39,6 @@ spec:
         - --model=$(MODEL_ID)
         - --device=cpu
         - --enforce-eager
-        - --disable-async-output-proc
-        - --worker-cls=vllm.worker.cpu_worker.CPUWorker
         command:
         - python3
         - -m
@@ -55,7 +53,7 @@ spec:
             secretKeyRef:
               key: hf_api_token
               name: hf-secret
-        image: vllm/vllm-openai:v0.6.6
+        image: vllm/vllm-openai:v0.6.3
         name: inference-server
         ports:
         - containerPort: 8000
@@ -69,10 +67,10 @@ spec:
         resources:
           limits:
             cpu: "8"
-            memory: 32Gi
+            memory: 64Gi
           requests:
             cpu: "4"
-            memory: 16Gi
+            memory: 32Gi
         volumeMounts:
         - mountPath: /dev/shm
           name: dshm

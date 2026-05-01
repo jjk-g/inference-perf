@@ -15,11 +15,8 @@ spec:
         args:
         - --model=$(MODEL_ID)
         - --device=cpu
-        - --enforce-eager
-        - --disable-async-output-proc
-        - --worker-cls=vllm.worker.cpu_worker.CPUWorker
         env:
-        - name: VLLM_DEVICE
+        - name: VLLM_TARGET_DEVICE
           value: cpu
         resources:
           requests:
