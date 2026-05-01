@@ -46,6 +46,10 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Fulfilled research request from Mayor for pending surveys. Identified opportunities for Gemma 7B-it (vLLM re-survey), Gemma 7B-it (CPU), Llama 3 8B (CPU), and Gemma 7B-it (JetStream GPU).
+- **2026-05-01**: Updated `inference-perf` skill based on worker feedback: emphasized YAML configuration and documented vLLM completion API path behavior.
+- **2026-05-01**: Fulfilled multiple skill checkout requests for `inference-perf` and provided deployment guidance for `llama3-8b-jetstream-gpu`.
+- **2026-05-01**: Fulfilled skill checkout request from `aipa_survey_packs__worker-ic-ncz`. Provided the `k8s-deploy` skill covering manifest application, health checks, and resource cleanup.
 - **2026-05-01**: Fulfilled research request from `aipa_survey_packs.worker-2` (ic-wisp-p3w) for JetStream `inference-perf` configuration. Provided sample YAML and connectivity best practices.
 - **2026-05-01**: Updated `gemma4-vllm` benchmark archive with corrected results (100% success rate, 150/150 requests) provided by `worker-3` (ic-wisp-8bh). Previous results had identified failures likely due to port conflicts.
 - **2026-05-01**: Standardized secret names in JetStream manifests from `huggingface-secret` to `hf-secret` to match cluster environment. Added `JAX_PLATFORMS=cpu` to JetStream GPU manifests to prevent TPU metadata loops.
