@@ -5,6 +5,7 @@
 - **Model ID**: `meta-llama/Meta-Llama-3.1-8B-Instruct`
 - **vLLM Overlay**: `packs/model-serving/overlays/kustomize/vllm/llama-3.1-8b-instruct`
 - **Status**: Benchmark Complete (New Record)
+- **Research Note**: 100% `token_count_mismatches` (558/558) observed in the successful run. This indicates a potential discrepancy between the server-side tokenizer and the benchmark client's tokenizer, which may affect the accuracy of the calculated throughput.
 - **Metrics**:
   - Request Latency (Mean): 2.24s
   - Time to First Token (Mean): 0.16s

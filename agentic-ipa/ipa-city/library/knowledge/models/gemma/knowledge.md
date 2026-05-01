@@ -37,5 +37,6 @@ The `gemma-7b-it` configuration is used for deploying the Gemma 7b Instruction T
 - **vLLM Overlay**: `packs/model-serving/overlays/kustomize/vllm/gemma-7b-it`
 - **JetStream Overlay**: `packs/model-serving/overlays/kustomize/jetstream/gemma-7b-it`
 - **Status**: Benchmark Failed (0% success rate)
+- **Research Note**: A discrepancy was found between the archived log (port 8001, 14.8% error) and the indexed results (port 8005, 100% failure). This suggests the port 8005 deployment was unstable or incorrectly configured.
 - **Resources**: 1 NVIDIA GPU (RTX 6000) or TPU v5e 2x4 (JetStream)
 - **Benchmark Results**: [summary_lifecycle_metrics.json](../../benchmarks/gemma-7b-it/summary_lifecycle_metrics.json)
