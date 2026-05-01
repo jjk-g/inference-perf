@@ -62,3 +62,15 @@ Example using `bd`:
 bd create "Archive results for {{.model}}" --label formula=archive-results
 ```
 """
+
+[[steps]]
+id = "delegate-cleanup"
+title = "5. Delegate Cleanup"
+description = """
+Once results are archived, instruct the agent to create a task for cleaning up K8s resources.
+Example using `bd`:
+```bash
+bd create "Cleanup resources for {{.model}}" --label action=cleanup
+```
+The task should instruct the worker to delete the deployment and service created for the model.
+"""
