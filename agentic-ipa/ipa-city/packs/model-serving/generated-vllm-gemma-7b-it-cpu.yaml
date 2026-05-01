@@ -40,6 +40,7 @@ spec:
         - --device=cpu
         - --disable-async-output-proc
         - --enforce-eager
+        - --worker-cls=vllm.worker.cpu_worker.CPUWorker
         command:
         - python3
         - -m
@@ -47,6 +48,10 @@ spec:
         env:
         - name: VLLM_TARGET_DEVICE
           value: cpu
+        - name: VLLM_DEVICE
+          value: cpu
+        - name: VLLM_LOGGING_LEVEL
+          value: DEBUG
         - name: MODEL_ID
           value: google/gemma-7b-it
         - name: HUGGING_FACE_HUB_TOKEN

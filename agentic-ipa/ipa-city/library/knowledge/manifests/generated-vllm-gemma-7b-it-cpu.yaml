@@ -38,17 +38,22 @@ spec:
       - args:
         - --model=$(MODEL_ID)
         - --device=cpu
-        - --disable-async-output-proc
         - --enforce-eager
+        - --disable-async-output-proc
+        - --worker-cls=vllm.worker.cpu_worker.CPUWorker
         command:
         - python3
         - -m
         - vllm.entrypoints.openai.api_server
         env:
+        - name: VLLM_DEVICE
+          value: cpu
         - name: VLLM_TARGET_DEVICE
           value: cpu
         - name: MODEL_ID
           value: google/gemma-7b-it
+        - name: VLLM_LOGGING_LEVEL
+          value: DEBUG
         - name: HUGGING_FACE_HUB_TOKEN
           valueFrom:
             secretKeyRef:

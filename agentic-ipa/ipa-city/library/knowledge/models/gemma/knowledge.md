@@ -45,7 +45,7 @@ The `gemma-7b-it` configuration is used for deploying the Gemma 7b Instruction T
   - **vLLM GPU**: Benchmark Failed (0% success rate).
   - **vLLM CPU**: **Fixed**. A crash was identified in v0.6.6 on CPU (is_async_output_supported).
 - **Troubleshooting Recommendations**:
-  - **CPU Deployment**: Use `--enforce-eager` and `--disable-async-output-proc` flags in the vLLM arguments to avoid `NotImplementedError` on CPU.
+  - **CPU Deployment**: Use `--enforce-eager`, `--disable-async-output-proc`, and `--worker-cls=vllm.worker.cpu_worker.CPUWorker` flags in the vLLM arguments to avoid `NotImplementedError` on CPU. Also set `VLLM_DEVICE=cpu` and `VLLM_TARGET_DEVICE=cpu` environment variables.
   - **Memory Limit**: Consider increasing to 64Gi if OOM kills are observed (similar to Llama-3.1-8B-Instruct).
   - **Readiness Probe**: Increase `failureThreshold` to 120 to allow more time for model weights to load.
 - **Research Note**: A discrepancy was found between the archived log (port 8001, 14.8% error) and the indexed results (port 8005, 100% failure). This suggests the port 8005 deployment was unstable or incorrectly configured. Switching to JetStream for GPU is currently in progress.
