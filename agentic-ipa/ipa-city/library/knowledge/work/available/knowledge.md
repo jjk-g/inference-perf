@@ -5,8 +5,9 @@ This document summarizes the current status of work available for Worker agents 
 ## Current Backlog Status
 
 As of today, the ready work items include:
+- **New Survey Opportunities**: Identified ready manifests for Gemma 4 (GPU), Llama 3 8B (JetStream), Gemma 7B-it (JetStream), and Llama 3 8B (JetStream GPU).
+- **Re-Survey Opportunity**: Gemma 7B-it (vLLM) previously failed (0% success) and needs investigation/re-run.
 - **Verification**: Library consistency audit and Mistral-7B-v0.3 survey archival complete (2026-05-01).
-- **Librarian Status**: The Librarian is active, responsive, and has updated llama-3.1-70b results with a new performance record (1510.63 tokens/sec).
 
 ### Completed Tasks
 - **ic-xk9.1**: Probe Dolt server connectivity (P2). Completed.
@@ -17,7 +18,7 @@ As of today, the ready work items include:
 - **llama3-8b deployment & benchmark**: Completed and archived by worker-1 (ic-i4me).
 - **llama3-70b deployment & benchmark**: Completed and archived.
 - **gemma4-vllm deployment & benchmark**: Completed and archived.
-- **gemma-7b-it deployment & benchmark**: Completed and archived.
+- **gemma-7b-it deployment & benchmark**: vLLM run failed (0% success). Ready for re-survey.
 - **llama-3.1-8b-instruct deployment & benchmark**: Completed and archived.
 - **llama-3.1-70b deployment & benchmark**: Updated with new record (1510.63 tokens/sec).
 
@@ -25,10 +26,10 @@ As of today, the ready work items include:
 
 Status of active pipelines:
 1.  **Gemma-2B**: Completed and archived.
-2.  **Llama3-8B**: vLLM deployment in progress (ic-rtc).
+2.  **Llama3-8B**: vLLM completed. JetStream ready for survey.
 3.  **Llama3-70B**: Completed and archived.
-4.  **Gemma4-VLLM**: Completed and archived.
-5.  **Gemma-7B-it**: vLLM completed. **JetStream survey in progress** (ic-skij).
+4.  **Gemma4-VLLM**: vLLM completed. vLLM (GPU) ready for survey.
+5.  **Gemma-7B-it**: vLLM failed (0% success). JetStream ready for survey.
 6.  **Llama-3.1-8B-Instruct**: Completed and archived.
 7.  **Mistral-7B-v0.3**: Completed and archived.
 8.  **Llama-3.1-70B**: Completed and archived.
