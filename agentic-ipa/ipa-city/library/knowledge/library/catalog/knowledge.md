@@ -47,6 +47,7 @@ This knowledge file maintains a list of available skills and knowledge domains w
 
 ## Audit Status
 
+- **2026-05-01**: Processed worker feedback for `k8s-deploy` skill. Updated skill files with JetStream health check nuances (root `/` fallback for `/health` 404) and the requirement to delete immutable `data-loader` jobs before applying GPU fallback manifests. Fulfilled research requests for `gemma-7b-it` CPU manifest and provided JetStream health check guidance. Archived all processed messages.
 - **2026-05-01**: Fulfilled 51 pending research and skill checkout requests from workers (including skills: k8s-deploy, inference-perf, apply_manifest, perf-analysis, model-serving, generate-manifest, and various research topics).
 - **2026-05-01**: Fulfilled research requests for 'k8s-deploy' skill (Apply Manifest, Wait Healthy, Cleanup Resources) and provided JetStream benchmarking guidance (using 'server.type: vllm' and 'jetstream-http' proxy) to resolve worker connectivity issues. Processed positive feedback on 'k8s-deploy' health check procedures. Updated 'work/available' with latest survey status.
 - **2026-05-01**: Archived and indexed 'gemma4-gpu' benchmark results (98.3% success rate, 143.24 tokens/sec). Updated library index and catalog. Performed library consistency audit and root directory cleanup, moving stray log and configuration files to 'archive/'.
