@@ -274,6 +274,37 @@ class TestUserSessionTruncation:
         assert payload["prompt"] == "tok_5 tok_5 tok_10"
 
     @pytest.mark.asyncio
+    async def test_prompt_truncation_uses_request_specific_max_tokens(self) -> None:
+        """The truncation target must account for the request's own max_tokens
+        (sampled from the output distribution), not the static client-wide
+        default, otherwise prompt + output can exceed max_model_len."""
+        tok = _mock_tokenizer()
+        hf = tok.get_tokenizer.return_value
+        hf.encode = MagicMock(side_effect=lambda text: [1] * tok.count_tokens(text))
+
+        session = LocalUserSession(user_session_id="sess_3", system_prompt="tok_5", tokenizer=tok, max_model_len=220)
+        LocalUserSession._instances["sess_3"] = session
+
+        session.history = ["tok_5"]
+        session.context = "tok_5 tok_5"
+
+        # Request-specific output size (5) is larger than the static client
+        # default (0) passed to to_request_body below.
+        data = UserSessionCompletionAPIData(user_session_id="sess_3", target_round=1, prompt="tok_10", max_tokens=5)
+
+        payload = await data.to_request_body("model", 0, False, False)
+
+        # target_len = 220 - 5 - 200 = 15, so the combined 20-token prompt must
+        # drop the history entry. The buggy target (220 - 0 - 200 = 20) would
+        # leave the prompt untruncated at 20 tokens.
+        assert payload["prompt"] == "tok_5 tok_10"
+        assert session.history == []
+        assert payload["max_tokens"] == 5
+
+        prompt_tokens = tok.count_tokens(payload["prompt"])
+        assert prompt_tokens + payload["max_tokens"] + 200 <= 220
+
+    @pytest.mark.asyncio
     async def test_prompt_truncation_system_prompt(self) -> None:
         tok = _mock_tokenizer()
         hf = tok.get_tokenizer.return_value
