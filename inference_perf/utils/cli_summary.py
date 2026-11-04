@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import re
-from typing import List, Dict, Any, Optional
+from typing import Iterable, List, Dict, Any, Optional
 from rich.console import Console
 from rich.table import Table
 from rich import print as rprint
@@ -28,6 +28,73 @@ def extract_stage_id(report_name: str) -> Optional[int]:
     return None
 
 
+def extract_session_stage_id(report_name: str) -> Optional[int]:
+    """Extract stage ID from session report name (e.g. 'stage_0_session_lifecycle_metrics')."""
+    match = re.match(r"stage_(\d+)_session_lifecycle_metrics", report_name)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def token_source_caption(stage_contents: Iterable[Dict[str, Any]], has_server_output: bool) -> str:
+    """Caption naming the source of each token column, plus any client fallbacks.
+
+    Prompt and output counts are both dual-sourced: the server's usage when it
+    reports one, client-side tokenization otherwise. A run that silently fell back
+    for some requests reads identically to one that did not, so say how many.
+    Reported per side: a request with no usage at all falls back on both sides,
+    so summing the two would overstate the number of requests.
+    """
+    parts = [
+        "Prompt: server-reported usage where available, client tokenization otherwise.",
+        "Out (client): response text re-tokenized by the client (output_len).",
+    ]
+    if has_server_output:
+        parts.append(
+            "Out (server): the count reported in the server's usage (output_tokens), "
+            "with the client count substituted for any request the server did not count."
+        )
+
+    prompt_fallbacks = 0
+    output_fallbacks = 0
+    for contents in stage_contents:
+        counts = contents.get("successes", {}).get("client_fallback_requests")
+        if isinstance(counts, dict):
+            prompt_fallbacks += int(counts.get("prompt") or 0)
+            output_fallbacks += int(counts.get("output") or 0)
+    if prompt_fallbacks or output_fallbacks:
+        parts.append(
+            "Requests that fell back to client tokenization (no server usage): "
+            f"{prompt_fallbacks} prompt-side, {output_fallbacks} output-side."
+        )
+
+    parts.append("See docs/metrics.md.")
+    return " ".join(parts)
+
+
+def has_server_reported_output(stage_contents: Iterable[Dict[str, Any]]) -> bool:
+    """Whether any successful request carried an output count the server actually reported.
+
+    Not the same question as "does output_tokens have a distribution". A request whose
+    usage reports no output count contributes the client count to that distribution, so
+    against a server that reports no usage at all the distribution is still there and is
+    identical to the client one: labeling those values "(server)" would show one number
+    twice and read as two independent counts agreeing. What earns the label is a request
+    that did not fall back, which is the success count minus the output-side fallbacks.
+    """
+    for contents in stage_contents:
+        successes = contents.get("successes", {})
+        if not isinstance(successes.get("output_tokens"), dict):
+            continue
+        fallbacks = successes.get("client_fallback_requests")
+        # A report predating client_fallback_requests cannot be classified; treat it as
+        # having server counts, which is what the table did before that field existed.
+        fallback_count = int(fallbacks.get("output") or 0) if isinstance(fallbacks, dict) else 0
+        if int(successes.get("count") or 0) - fallback_count > 0:
+            return True
+    return False
+
+
 def print_summary_table(reports: List[ReportFile]) -> None:
     """Print a summary table of all stages to stdout using rich."""
     stage_reports: Dict[int, Dict[str, Any]] = {}
@@ -39,6 +106,8 @@ def print_summary_table(reports: List[ReportFile]) -> None:
 
     if not stage_reports:
         rprint("[yellow]No per-stage lifecycle metrics found to display summary table.[/yellow]")
+        print_session_summary_tables(reports)
+        print_error_summary_table(reports)
         return
 
     # Sort stages by ID
@@ -92,17 +161,28 @@ def print_summary_table(reports: List[ReportFile]) -> None:
     speed_table.add_column("Norm TPOT Med", justify="right")
     speed_table.add_column("Norm TPOT P90", justify="right")
 
-    # Table 4: Token Lengths
+    # Table 4: Token Lengths. Column labels carry the source of each count: prompt tokens
+    # come from the server's usage when it reports them, output has two independent
+    # counts, and a report that mixes sources is otherwise indistinguishable from one
+    # that does not.
+    has_server_output = has_server_reported_output(stage_reports.values())
     token_table = Table(
-        title="[bold magenta]Token Length Aggregates[/bold magenta]", show_header=True, header_style="bold cyan"
+        title="[bold magenta]Token Length Aggregates[/bold magenta]",
+        caption=token_source_caption(stage_reports.values(), has_server_output),
+        show_header=True,
+        header_style="bold cyan",
     )
     token_table.add_column("Stage", justify="right")
     token_table.add_column("Prompt Mean", justify="right")
     token_table.add_column("Prompt Med", justify="right")
     token_table.add_column("Prompt P90", justify="right")
-    token_table.add_column("Output Mean", justify="right")
-    token_table.add_column("Output Med", justify="right")
-    token_table.add_column("Output P90", justify="right")
+    token_table.add_column("Out Mean\n(client)", justify="right")
+    token_table.add_column("Out Med\n(client)", justify="right")
+    token_table.add_column("Out P90\n(client)", justify="right")
+    if has_server_output:
+        token_table.add_column("Out Mean\n(server)", justify="right")
+        token_table.add_column("Out Med\n(server)", justify="right")
+        token_table.add_column("Out P90\n(server)", justify="right")
 
     for stage_id in sorted_stages:
         contents = stage_reports[stage_id]
@@ -188,13 +268,14 @@ def print_summary_table(reports: List[ReportFile]) -> None:
             norm_tpot_med = f"{median:0.1f}"
             norm_tpot_p90 = f"{p90:0.1f}"
 
-        # Token Length extraction
-        prompt_len = successes.get("prompt_len")
+        # Token Length extraction. "prompt_len" is the pre-unification name for
+        # "prompt_tokens"; keep reading it so older reports still render.
+        prompt_tokens = successes.get("prompt_tokens") or successes.get("prompt_len")
         prompt_mean = prompt_med = prompt_p90 = "-"
-        if prompt_len:
-            prompt_mean = f"{prompt_len.get('mean', 0.0):0.1f}"
-            prompt_med = f"{prompt_len.get('median', 0.0):0.1f}"
-            prompt_p90 = f"{prompt_len.get('p90', 0.0):0.1f}"
+        if prompt_tokens:
+            prompt_mean = f"{prompt_tokens.get('mean', 0.0):0.1f}"
+            prompt_med = f"{prompt_tokens.get('median', 0.0):0.1f}"
+            prompt_p90 = f"{prompt_tokens.get('p90', 0.0):0.1f}"
 
         output_len = successes.get("output_len")
         output_mean = output_med = output_p90 = "-"
@@ -202,6 +283,15 @@ def print_summary_table(reports: List[ReportFile]) -> None:
             output_mean = f"{output_len.get('mean', 0.0):0.1f}"
             output_med = f"{output_len.get('median', 0.0):0.1f}"
             output_p90 = f"{output_len.get('p90', 0.0):0.1f}"
+
+        # Server-reported output tokens (usage.completion_tokens), the independent count
+        # that output_len is compared against.
+        server_output = successes.get("output_tokens")
+        srv_out_mean = srv_out_med = srv_out_p90 = "-"
+        if isinstance(server_output, dict) and "mean" in server_output:
+            srv_out_mean = f"{server_output.get('mean', 0.0):0.1f}"
+            srv_out_med = f"{server_output.get('median', 0.0):0.1f}"
+            srv_out_p90 = f"{server_output.get('p90', 0.0):0.1f}"
 
         # Populate Table 1
         summary_row = [
@@ -256,7 +346,7 @@ def print_summary_table(reports: List[ReportFile]) -> None:
         )
 
         # Populate Table 4
-        token_table.add_row(
+        token_row = [
             str(stage_id),
             prompt_mean,
             prompt_med,
@@ -264,9 +354,405 @@ def print_summary_table(reports: List[ReportFile]) -> None:
             output_mean,
             output_med,
             output_p90,
-        )
+        ]
+        if has_server_output:
+            token_row.extend([srv_out_mean, srv_out_med, srv_out_p90])
+        token_table.add_row(*token_row)
 
     console.print(summary_table)
     console.print(latency_table)
     console.print(speed_table)
     console.print(token_table)
+
+    # Print session-level metrics if available
+    print_session_summary_tables(reports)
+    print_error_summary_table(reports)
+
+
+def _fmt(value: Optional[float], places: int) -> str:
+    """A dash for a statistic that does not exist, rather than a misleading 0.00.
+
+    reportgen writes None for a distribution it had no samples for. Printing 0.00 there
+    would read as "sessions took no time" instead of "no session finished".
+    """
+    return "-" if value is None else f"{value:.{places}f}"
+
+
+def print_session_summary_tables(reports: List[ReportFile]) -> None:
+    """Print session-level summary tables for session-based data generators."""
+    session_reports: Dict[int, Dict[str, Any]] = {}
+
+    # Extract session lifecycle metrics reports
+    for report in reports:
+        stage_id = extract_session_stage_id(report.name)
+        if stage_id is not None:
+            session_reports[stage_id] = report.contents
+
+    if not session_reports:
+        # No session metrics found, skip
+        return
+
+    # Sort stages by ID
+    sorted_stages = sorted(session_reports.keys())
+
+    console = Console()
+
+    # Table 1: Session Summary
+    session_summary_table = Table(
+        title="[bold magenta]Session Summary[/bold magenta]",
+        caption="Not Completed sessions due to SIGINT or connection errors, or exceeding max_stage_duration",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    session_summary_table.add_column("Stage", justify="right")
+    session_summary_table.add_column("Sessions/s", justify="right")
+    session_summary_table.add_column("Total Sessions", justify="right")
+    session_summary_table.add_column("Succeeded", justify="right")
+    session_summary_table.add_column("Failed", justify="right")
+    session_summary_table.add_column("Not Completed", justify="right")
+    session_summary_table.add_column("Error %", justify="right")
+    session_summary_table.add_column("Total Events", justify="right")
+    session_summary_table.add_column("Events Completed", justify="right")
+    session_summary_table.add_column("Events Cancelled", justify="right")
+    session_summary_table.add_column("Bad Tool Calls Substitutions", justify="right")
+    # Only when something actually retried: this table already runs 10 columns wide
+    # and squeezes headers, so a permanent all-zero column costs real legibility.
+    has_retries = any(session_reports[sid].get("total_retry_attempts", 0) for sid in sorted_stages)
+    if has_retries:
+        session_summary_table.add_column("Retries (recovered)", justify="right")
+
+    # Table 2: Session Duration & Events
+    session_duration_table = Table(
+        title="[bold magenta]Session Duration & Events[/bold magenta]",
+        caption="Completed sessions only (succeeded or failed). Not completed sessions excluded.",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    session_duration_table.add_column("Stage", justify="right")
+    session_duration_table.add_column("Duration Mean (s)", justify="right")
+    session_duration_table.add_column("Duration Med (s)", justify="right")
+    session_duration_table.add_column("Duration P90 (s)", justify="right")
+    session_duration_table.add_column("Events Mean", justify="right")
+    session_duration_table.add_column("Events Med", justify="right")
+    session_duration_table.add_column("Events P90", justify="right")
+
+    # Table 3: Session Token Totals
+    session_tokens_table = Table(
+        title="[bold magenta]Session Token Totals (per session)[/bold magenta]",
+        caption="Completed sessions only (succeeded or failed). Not completed sessions excluded.",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    session_tokens_table.add_column("Stage", justify="right")
+    session_tokens_table.add_column("In Tok/Sess Mean", justify="right")
+    session_tokens_table.add_column("In Tok/Sess Med", justify="right")
+    session_tokens_table.add_column("In Tok/Sess P90", justify="right")
+    session_tokens_table.add_column("Out Tok/Sess Mean", justify="right")
+    session_tokens_table.add_column("Out Tok/Sess Med", justify="right")
+    session_tokens_table.add_column("Out Tok/Sess P90", justify="right")
+
+    # Table 4: TFUT (Time to First User Token)
+    tfut_table = Table(
+        title="[bold magenta]Session TFUT (Time to First User Token)[/bold magenta]",
+        caption="Completed sessions only (succeeded or failed). Not completed sessions excluded.",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    tfut_table.add_column("Stage", justify="right")
+    tfut_table.add_column("TFUT Mean (s)", justify="right")
+    tfut_table.add_column("TFUT Med (s)", justify="right")
+    tfut_table.add_column("TFUT P90 (s)", justify="right")
+    tfut_table.add_column("Sessions w/ TFUT", justify="right")
+    tfut_table.add_column("TFUT None Reasons", justify="right")
+    has_any_tfut = False
+
+    for stage_id in sorted_stages:
+        contents = session_reports[stage_id]
+
+        num_sessions = contents.get("num_sessions", 0)
+        num_sessions_completed = contents.get("num_sessions_completed", 0)
+        num_sessions_succeeded = contents.get("num_sessions_succeeded", 0)
+        num_sessions_failed = contents.get("num_sessions_failed", 0)
+        num_sessions_not_completed = contents.get("num_sessions_not_completed", 0)
+        total_events = contents.get("total_events", 0)
+        total_events_completed = contents.get("total_events_completed", 0)
+        total_events_cancelled = contents.get("total_events_cancelled", 0)
+        sessions_per_second = contents.get("sessions_per_second", 0.0)
+        # total_recorded_substitutions is a {count, messages} dict; fall back to a
+        # bare int for older report shapes.
+        substitutions_entry = contents.get("total_recorded_substitutions", 0)
+        total_recorded_substitutions = (
+            substitutions_entry.get("count", 0) if isinstance(substitutions_entry, dict) else substitutions_entry
+        )
+
+        total_retry_attempts = contents.get("total_retry_attempts", 0)
+        total_retries_recovered = contents.get("total_retries_recovered", 0)
+
+        # Color code succeeded/failed sessions
+        succeeded_str = f"[green]{num_sessions_succeeded}[/]"
+        failed_color = "red" if num_sessions_failed > 0 else "green"
+        failed_str = f"[{failed_color}]{num_sessions_failed}[/]"
+
+        not_completed_color = "red" if num_sessions_not_completed > 0 else "green"
+        not_completed_str = f"[{not_completed_color}]{num_sessions_not_completed}[/]"
+
+        # Session error rate of sessions that actually completed (succeeded or failed)
+        session_error_rate = num_sessions_failed / num_sessions_completed if num_sessions_completed > 0 else 0.0
+        session_error_pct = session_error_rate * 100.0
+        error_color = "red" if session_error_rate > 0.05 else ("yellow" if session_error_rate > 0 else "green")
+        error_str = f"[{error_color}]{session_error_pct:.1f}%[/]"
+
+        substitution_str = (
+            f"[yellow]{total_recorded_substitutions}[/]"
+            if total_recorded_substitutions > 0
+            else str(total_recorded_substitutions)
+        )
+
+        # Populate Table 1
+        session_row = [
+            str(stage_id),
+            f"{sessions_per_second:.2f}",
+            str(num_sessions),
+            succeeded_str,
+            failed_str,
+            not_completed_str,
+            error_str,
+            str(total_events),
+            str(total_events_completed),
+            str(total_events_cancelled),
+            substitution_str,
+        ]
+        if has_retries:
+            # Recovered is the useful half, so colour on it rather than on the
+            # attempt count: retries that saved a session are green, retries that
+            # were spent and still failed are yellow.
+            retry_color = "green" if total_retries_recovered else "yellow"
+            session_row.append(f"[{retry_color}]{total_retry_attempts} ({total_retries_recovered})[/]")
+        session_summary_table.add_row(*session_row)
+
+        # Extract session duration metrics. session_duration_sec covers completed sessions
+        # only, so a stage whose deadline is shorter than one session has none to summarize
+        # and reportgen writes None -- present, not absent, so a .get() default never fires.
+        # Every read below tolerates that, so the stage still gets a row instead of being
+        # skipped: "this stage completed nothing" is worth showing, and a dash says it
+        # without implying the sessions took no time.
+        session_duration = contents.get("session_duration_sec") or {}
+        num_events = contents.get("num_events") or {}
+
+        # Populate Table 2
+        session_duration_table.add_row(
+            str(stage_id),
+            _fmt(session_duration.get("mean"), 2),
+            _fmt(session_duration.get("median"), 2),
+            _fmt(session_duration.get("p90"), 2),
+            _fmt(num_events.get("mean"), 1),
+            _fmt(num_events.get("median"), 1),
+            _fmt(num_events.get("p90"), 1),
+        )
+
+        # Extract token metrics. None for the same reason as above: every session that
+        # could have carried a token count was truncated before it reported one.
+        total_input_tokens = contents.get("total_input_tokens") or {}
+        total_output_tokens = contents.get("total_output_tokens") or {}
+
+        # Populate Table 3
+        session_tokens_table.add_row(
+            str(stage_id),
+            _fmt(total_input_tokens.get("mean"), 1),
+            _fmt(total_input_tokens.get("median"), 1),
+            _fmt(total_input_tokens.get("p90"), 1),
+            _fmt(total_output_tokens.get("mean"), 1),
+            _fmt(total_output_tokens.get("median"), 1),
+            _fmt(total_output_tokens.get("p90"), 1),
+        )
+
+        # Extract TFUT metrics
+        sessions_with_tfut = contents.get("sessions_with_tfut", 0)
+        tfut_sec = contents.get("tfut_sec", {})
+        tfut_none_reasons = contents.get("tfut_none_reasons")
+
+        if sessions_with_tfut > 0:
+            has_any_tfut = True
+            tfut_mean = f"{tfut_sec.get('mean', 0.0):.3f}"
+            tfut_median = f"{tfut_sec.get('median', 0.0):.3f}"
+            tfut_p90 = f"{tfut_sec.get('p90', 0.0):.3f}"
+        else:
+            tfut_mean = tfut_median = tfut_p90 = "-"
+
+        reasons_str = "-"
+        if tfut_none_reasons:
+            reasons_str = ", ".join(f"{k}: {v}" for k, v in tfut_none_reasons.items())
+
+        # Populate Table 4
+        tfut_table.add_row(
+            str(stage_id),
+            tfut_mean,
+            tfut_median,
+            tfut_p90,
+            str(sessions_with_tfut),
+            reasons_str,
+        )
+
+    # Table 4: KV Cache Hit Rate (only when at least one stage reports it)
+    has_cache_info = any(session_reports[stage_id].get("kv_cache_hit_percent") is not None for stage_id in sorted_stages)
+    cache_table: Optional[Table] = None
+    if has_cache_info:
+        cache_table = Table(
+            title="[bold magenta]Session KV Cache Hit Rate[/bold magenta]",
+            caption="Completed sessions only (succeeded or failed). Not completed sessions excluded.",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        cache_table.add_column("Stage", justify="right")
+        cache_table.add_column("Hit % (pooled)", justify="right")
+        cache_table.add_column("Hit %/Sess Mean", justify="right")
+        cache_table.add_column("Hit %/Sess Med", justify="right")
+        cache_table.add_column("Hit %/Sess P90", justify="right")
+        cache_table.add_column("Sessions w/ Info", justify="right")
+
+        for stage_id in sorted_stages:
+            contents = session_reports[stage_id]
+            pooled = contents.get("kv_cache_hit_percent")
+            per_session = contents.get("kv_cache_hit_per_session_percent") or {}
+            sessions_info = contents.get("sessions_with_cache_info", 0)
+
+            cache_table.add_row(
+                str(stage_id),
+                f"{pooled:.1f}" if pooled is not None else "N/A",
+                f"{per_session.get('mean', 0.0):.1f}" if per_session else "N/A",
+                f"{per_session.get('median', 0.0):.1f}" if per_session else "N/A",
+                f"{per_session.get('p90', 0.0):.1f}" if per_session else "N/A",
+                str(sessions_info),
+            )
+
+    # Print all session tables
+    console.print(session_summary_table)
+    if session_duration_table.row_count > 0:
+        console.print(session_duration_table)
+    if session_tokens_table.row_count > 0:
+        console.print(session_tokens_table)
+    if cache_table is not None:
+        console.print(cache_table)
+    if has_any_tfut:
+        console.print(tfut_table)
+
+
+def _collect_error_labels(failures_by_stage: Dict[int, Dict[str, Any]]) -> list[str]:
+    """Return the ordered union of error labels (from failures.by_label) across all stages."""
+    seen: list[str] = []
+    for by_label in failures_by_stage.values():
+        for key in by_label:
+            if key not in seen:
+                seen.append(key)
+    return seen
+
+
+def _build_error_table(
+    sorted_stages: list[int],
+    successes_by_stage: Dict[int, int],
+    failures_by_stage: Dict[int, Dict[str, Any]],
+    substitutions_by_stage: Dict[int, int],
+    retries_by_stage: Optional[Dict[int, Dict[str, Any]]] = None,
+    title: str = "Request Error Summary",
+    successes_label: str = "Successes",
+) -> Table:
+    """Build the per-stage error summary table."""
+    labels = _collect_error_labels(failures_by_stage)
+    has_substitutions = any(substitutions_by_stage.get(s, 0) > 0 for s in sorted_stages)
+    retries_by_stage = retries_by_stage or {}
+    has_retries = any(retries_by_stage.get(s) for s in sorted_stages)
+    table = Table(title=f"[bold magenta]{title}[/bold magenta]", show_header=True, header_style="bold cyan")
+    table.add_column("Stage", justify="right")
+    table.add_column(successes_label, justify="right")
+    if has_substitutions:
+        table.add_column("Bad Tool Calls Substitutions", justify="right")
+    if has_retries:
+        # Retries are not an error label: they never go through build_error_counts,
+        # so they stay out of failures.count and out of the red error columns.
+        table.add_column("Retried (recovered)", justify="right")
+    for label in labels:
+        table.add_column(label, justify="right")
+
+    for stage_id in sorted_stages:
+        successes = successes_by_stage.get(stage_id, 0)
+        row = [str(stage_id), f"[green]{successes}[/green]"]
+        if has_substitutions:
+            sub_count = substitutions_by_stage.get(stage_id, 0)
+            color = "yellow" if sub_count > 0 else "green"
+            row.append(f"[{color}]{sub_count}[/]")
+        if has_retries:
+            retry_entry = retries_by_stage.get(stage_id) or {}
+            retried = retry_entry.get("requests_retried", 0)
+            recovered = retry_entry.get("recovered", 0)
+            # Green once a retry actually rescued a request; yellow when attempts
+            # were spent and every one of them still failed.
+            color = "green" if recovered else ("yellow" if retried else "green")
+            row.append(f"[{color}]{retried} ({recovered})[/]")
+        by_label = failures_by_stage.get(stage_id, {})
+        for label in labels:
+            entry = by_label.get(label)
+            count = entry["count"] if isinstance(entry, dict) else 0
+            color = "red" if count > 0 else "green"
+            row.append(f"[{color}]{count}[/]")
+        table.add_row(*row)
+    return table
+
+
+def print_error_summary_table(reports: List[ReportFile]) -> None:
+    """Print a per-stage error summary table, joining the folded lifecycle reports.
+
+    Per-stage successes and error-label breakdown come from
+    ``stage_N_lifecycle_metrics`` and substitution counts from
+    ``stage_N_session_lifecycle_metrics``.
+    """
+    successes_by_stage: Dict[int, int] = {}
+    failures_by_stage: Dict[int, Dict[str, Any]] = {}
+    substitutions_by_stage: Dict[int, int] = {}
+    retries_by_stage: Dict[int, Dict[str, Any]] = {}
+    session_successes_by_stage: Dict[int, int] = {}
+    session_failures_by_stage: Dict[int, Dict[str, Any]] = {}
+
+    for report in reports:
+        stage_id = extract_stage_id(report.name)
+        if stage_id is not None:
+            successes = report.contents.get("successes", {})
+            successes_by_stage[stage_id] = successes.get("count", 0) if isinstance(successes, dict) else 0
+            failures = report.contents.get("failures", {})
+            failures_by_stage[stage_id] = failures.get("by_label", {}) if isinstance(failures, dict) else {}
+            # Absent (older reports) or null (nothing retried) both mean no column.
+            retries = report.contents.get("retries")
+            if isinstance(retries, dict):
+                retries_by_stage[stage_id] = retries
+            continue
+        session_stage_id = extract_session_stage_id(report.name)
+        if session_stage_id is not None:
+            sub_entry = report.contents.get("total_recorded_substitutions", 0)
+            substitutions_by_stage[session_stage_id] = sub_entry.get("count", 0) if isinstance(sub_entry, dict) else sub_entry
+            session_successes_by_stage[session_stage_id] = report.contents.get("num_sessions_succeeded", 0)
+            session_failures = report.contents.get("failures", {})
+            session_failures_by_stage[session_stage_id] = (
+                session_failures.get("by_label", {}) if isinstance(session_failures, dict) else {}
+            )
+
+    console = Console()
+
+    if successes_by_stage or failures_by_stage:
+        sorted_stages = sorted(set(successes_by_stage) | set(failures_by_stage))
+        console.print(
+            _build_error_table(sorted_stages, successes_by_stage, failures_by_stage, substitutions_by_stage, retries_by_stage)
+        )
+
+    # Only worth a table when a session actually failed; a clean replay run would
+    # otherwise print a table whose only column is the success count.
+    if any(session_failures_by_stage.values()):
+        sorted_session_stages = sorted(set(session_successes_by_stage) | set(session_failures_by_stage))
+        console.print(
+            _build_error_table(
+                sorted_session_stages,
+                session_successes_by_stage,
+                session_failures_by_stage,
+                {},
+                title="Session Error Summary",
+                successes_label="Sessions Succeeded",
+            )
+        )

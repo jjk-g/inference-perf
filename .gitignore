@@ -47,6 +47,9 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
+coverage.json
+coverage_main.json
+coverage.lcov
 *.cover
 *.py,cover
 .hypothesis/
@@ -177,3 +180,19 @@ cython_debug/
 
 # Test Reports (directories)
 reports-*/
+
+# HuggingFace cache
+.hf_cache/
+
+# VSCode settings (keep local configurations)
+.vscode/
+
+# Claude Code local settings and worktrees
+.claude/
+
+# Optional live-test per-case reports
+tests/optional/**/output/
+
+# scripts/check_mutation_regression.py
+mutation.json
+/mutants/

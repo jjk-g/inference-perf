@@ -33,35 +33,43 @@ Key architectural principles tested:
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import multiprocessing as mp
 import sys
+import weakref
 from pathlib import Path
 from typing import Any, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from inference_perf.datagen.otel_trace_replay_datagen import OTelTraceReplayDataGenerator
-from inference_perf.datagen.replay_graph_session_datagen import (
+from inference_perf.datagen.replay.otel_trace_replay_datagen import OTelTraceReplayDataGenerator
+from inference_perf.datagen.replay.replay_graph_session_datagen import (
     EventFailedError,
     EventOutputRegistry,
+    ReplayGraphSessionGeneratorBase,
+    ReplaySession,
     ReplaySessionEvent,
     ReplaySessionState,
+    SessionFailureCause,
     SessionChatCompletionAPIData,
     SessionInferenceInfo,
     WorkerSessionTracker,
 )
-from inference_perf.datagen.otel_trace_to_replay_graph import (
+from inference_perf.config.datagen.replay import BadToolCallHandling, OTelTraceReplayConfig, ToolChoiceMode
+from inference_perf.payloads import RequestMetrics, Text
+from inference_perf.datagen.replay.otel_trace_to_replay_graph import (
     build_graph,
     build_raw_calls,
 )
-from inference_perf.datagen.replay_graph_types import InputSegment
+from inference_perf.datagen.replay.replay_graph_types import GraphCall, GraphEvent, InputSegment, ReplayGraph
 from inference_perf.apis.chat import ChatMessage
-from inference_perf.config import APIConfig, APIType
+from inference_perf.config import APIConfig, APIType, SessionReplayConfig
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +86,7 @@ def make_api_config() -> APIConfig:
 def make_mock_tokenizer() -> MagicMock:
     """Return a mock tokenizer that counts words as tokens."""
     tok = MagicMock()
-    tok.count_tokens = lambda text: max(1, len((text or "").split()))
+    tok.count_tokens = lambda text, **kw: max(1, len((text or "").split()))
     return tok
 
 
@@ -93,6 +101,30 @@ def make_mock_api_config_streaming(streaming: bool = False) -> MagicMock:
     cfg = MagicMock()
     cfg.streaming = streaming
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# SessionReplayConfig tests
+# ---------------------------------------------------------------------------
+
+
+class TestSessionReplayConfigPredecessorWaitTimeout:
+    """Test the predecessor_wait_timeout_sec config field."""
+
+    def test_default_is_3600(self) -> None:
+        """Default preserves the previous hardcoded 3600s behavior."""
+        config = SessionReplayConfig()
+        assert config.predecessor_wait_timeout_sec == 3600.0
+
+    def test_accepts_zero(self) -> None:
+        """0 is a valid value, meaning 'wait indefinitely'."""
+        config = SessionReplayConfig(predecessor_wait_timeout_sec=0)
+        assert config.predecessor_wait_timeout_sec == 0
+
+    def test_rejects_negative(self) -> None:
+        """Negative timeouts are rejected."""
+        with pytest.raises(ValidationError):
+            SessionReplayConfig(predecessor_wait_timeout_sec=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +173,37 @@ class TestEventOutputRegistry:
         reg = EventOutputRegistry()
         with pytest.raises(TimeoutError):
             asyncio.run(reg.require_async("event_001", timeout_sec=0.1))
+
+    def test_require_async_zero_timeout_waits_indefinitely(self) -> None:
+        """timeout_sec=0 waits indefinitely instead of timing out immediately."""
+        reg = EventOutputRegistry()
+
+        async def _run() -> str:
+            async def producer() -> None:
+                # Longer than any timeout that would previously have fired.
+                await asyncio.sleep(0.2)
+                reg.record("event_001", "delayed output", [])
+
+            asyncio.create_task(producer())
+            return str(await reg.require_async("event_001", timeout_sec=0))
+
+        result = asyncio.run(_run())
+        assert result == "delayed output"
+
+    def test_require_async_zero_timeout_still_propagates_failure(self) -> None:
+        """timeout_sec=0 (indefinite) still raises promptly on predecessor failure."""
+        reg = EventOutputRegistry()
+
+        async def _run() -> None:
+            async def fail_producer() -> None:
+                await asyncio.sleep(0.05)
+                reg.record_failure("event_001")
+
+            asyncio.create_task(fail_producer())
+            await reg.require_async("event_001", timeout_sec=0)
+
+        with pytest.raises(EventFailedError):
+            asyncio.run(_run())
 
     def test_double_record_raises_error(self) -> None:
         """Recording the same event twice should raise ValueError."""
@@ -308,8 +371,7 @@ class TestSessionChatCompletionAPIData:
 
         info = SessionInferenceInfo(
             output_text="test output",
-            input_tokens=10,
-            output_tokens=5,
+            request_metrics=RequestMetrics(text=Text(input_tokens=10)),
         )
 
         api_data.on_completion(info)
@@ -332,7 +394,10 @@ class TestSessionChatCompletionAPIData:
         # Session has 2 events total
         # First complete event_0
         api_data_0 = self._make_api_data("session_1:event_0", registry, tracker, mock_queue, total_events=2)
-        info_0 = SessionInferenceInfo(output_text="first", input_tokens=5, output_tokens=3)
+        info_0 = SessionInferenceInfo(
+            output_text="first",
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        )
         api_data_0.on_completion(info_0)
 
         # No notification yet (only 1 of 2 events complete)
@@ -340,7 +405,10 @@ class TestSessionChatCompletionAPIData:
 
         # Now complete event_1 (the last event)
         api_data_1 = self._make_api_data("session_1:event_1", registry, tracker, mock_queue, total_events=2)
-        info_1 = SessionInferenceInfo(output_text="done", input_tokens=5, output_tokens=3)
+        info_1 = SessionInferenceInfo(
+            output_text="done",
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        )
         api_data_1.on_completion(info_1)
 
         # Should now have completion notification
@@ -372,6 +440,43 @@ class TestSessionChatCompletionAPIData:
         # Registry should record failure (not empty output)
         assert registry.is_event_failed("session_1:event_1")
         assert registry.get_output_by_event_id("session_1:event_1") is None
+
+    def test_skip_if_session_failed_preserves_original_failure(self) -> None:
+        """A late event is retired without replacing the session's root cause."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        tracker.mark_session_failed("session_1", SessionFailureCause.REQUEST_FAILED, "original failure")
+        tracker.record_event_drained("session_1", "session_1:event_0")
+        completion_queue = MagicMock()
+        generator = MagicMock(spec=ReplayGraphSessionGeneratorBase)
+        api_data = self._make_api_data(
+            "session_1:event_1",
+            registry,
+            tracker,
+            completion_queue=completion_queue,
+            total_events=2,
+        )
+        api_data.generator = generator
+
+        assert api_data.skip_if_session_failed("post-permit check") is True
+        assert api_data.skip_request is True
+        assert registry.is_event_failed("session_1:event_1")
+        assert tracker.get_session_failure("session_1") == (
+            SessionFailureCause.REQUEST_FAILED.value,
+            "original failure",
+        )
+        completion_queue.put_nowait.assert_not_called()
+        assert tracker._drained_events["session_1"] == {"session_1:event_0", "session_1:event_1"}
+        generator.evict_worker_session.assert_called_once_with("session_1")
+
+    def test_skip_if_session_failed_is_noop_for_healthy_session(self) -> None:
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        api_data = self._make_api_data("session_1:event_1", registry, tracker)
+
+        assert api_data.skip_if_session_failed("post-permit check") is False
+        assert api_data.skip_request is False
+        assert not registry.is_event_failed("session_1:event_1")
 
     @pytest.mark.asyncio
     async def test_wait_for_predecessors_waits_and_substitutes(self) -> None:
@@ -410,6 +515,108 @@ class TestSessionChatCompletionAPIData:
         # Messages should be substituted
         assert len(api_data.messages) == 2
         assert api_data.messages[1].content == "Predecessor output"
+
+    @pytest.mark.asyncio
+    async def test_wait_for_predecessors_uses_configured_timeout(self) -> None:
+        """wait_for_predecessors_and_substitute forwards predecessor_wait_timeout_sec to require_async."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        registry.record("session_1:event_0", "Predecessor output", [])
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="Question")],
+            max_tokens=50,
+            event_id="session_1:event_1",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=2,
+            predecessor_event_ids=["session_1:event_0"],
+            predecessor_wait_timeout_sec=0,
+        )
+
+        seen_timeouts = []
+        original_require_async = registry.require_async
+
+        async def spy_require_async(event_id: str, timeout_sec: float = 3600.0) -> str:
+            seen_timeouts.append(timeout_sec)
+            return await original_require_async(event_id, timeout_sec=timeout_sec)
+
+        registry.require_async = spy_require_async  # type: ignore[method-assign]
+
+        await api_data.wait_for_predecessors_and_substitute()
+
+        assert seen_timeouts == [0]
+
+    @pytest.mark.asyncio
+    async def test_wait_for_predecessors_zero_timeout_does_not_time_out(self) -> None:
+        """predecessor_wait_timeout_sec=0 waits indefinitely rather than failing immediately."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="Question")],
+            max_tokens=50,
+            event_id="session_1:event_1",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=2,
+            predecessor_event_ids=["session_1:event_0"],
+            predecessor_wait_timeout_sec=0,
+        )
+
+        async def producer() -> None:
+            await asyncio.sleep(0.1)
+            registry.record("session_1:event_0", "Predecessor output", [])
+
+        asyncio.create_task(producer())
+        await api_data.wait_for_predecessors_and_substitute()
+
+        assert api_data.skip_request is False
+        assert not registry.is_event_failed("session_1:event_1")
+
+    @pytest.mark.asyncio
+    async def test_disable_output_substitution_keeps_recorded(self) -> None:
+        """With disable_output_substitution=True, predecessors are still awaited
+        but the recorded assistant message is sent as-is (no live substitution)."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        # Predecessor produced a *different* live output than what was recorded.
+        registry.record("session_1:event_0", "Predecessor output", [])
+
+        messages = [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "RECORDED"},
+        ]
+        segments = [
+            InputSegment(type="unique", message_count=1, token_count=5),
+            InputSegment(type="output", message_count=1, token_count=10, source_event_id="session_1:event_0"),
+        ]
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="Question"), ChatMessage(role="assistant", content="RECORDED")],
+            max_tokens=50,
+            event_id="session_1:event_1",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=2,
+            predecessor_event_ids=["session_1:event_0"],
+            input_segments=segments,
+            original_messages=messages,
+            disable_output_substitution=True,
+        )
+
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # Predecessor was awaited (no failure / skip) ...
+        assert api_data.skip_request is False
+        assert tracker.is_session_failed("session_1") is False
+        # ... but the recorded assistant content is preserved, NOT substituted
+        # with the live "Predecessor output".
+        assert api_data.messages[1].content == "RECORDED"
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +898,7 @@ class TestEndToEndSimpleChain:
             pytest.skip(f"Test trace not found: {SIMPLE_CHAIN_JSON}")
         data = json.loads(SIMPLE_CHAIN_JSON.read_text())
         spans = data.get("spans", [])
-        calls = build_raw_calls(spans)
+        calls, _ = build_raw_calls(spans)
         graph = build_graph(calls)
         return graph, calls
 
@@ -757,11 +964,19 @@ class TestEndToEndSimpleChain:
         queue: mp.Queue[Any] = mp.Queue()
         gen = object.__new__(OTelTraceReplayDataGenerator)
         gen.all_events = events
+        gen._session_events = {0: events}
         gen.output_registry = registry
         gen.worker_tracker = tracker
         gen.session_completion_queue = queue
         gen.api_config = make_api_config()
-        gen.session_graph_state = {session_id: MagicMock(graph=graph)}
+        mock_otel_config = MagicMock()
+        mock_otel_config.attribute_to_header_map = {}
+        mock_otel_config.attribute_to_label_map = {}
+        mock_otel_config.bad_tool_call_handling = BadToolCallHandling.NONE
+        mock_otel_config.tool_choice_mode = ToolChoiceMode.FORCE_RECORDED
+        gen.otel_config = mock_otel_config
+        gen.replay_config = mock_otel_config
+        gen.session_graph_state = {session_id: MagicMock(graph=graph, random_string=None)}
 
         from inference_perf.apis import LazyLoadInferenceAPIData
 
@@ -853,8 +1068,9 @@ class TestSessionChatCompletionAPIDataErrorPaths:
         # Should return empty inference info
         assert isinstance(result, SessionInferenceInfo)
         assert result.output_text == ""
-        assert result.input_tokens == 0
-        assert result.output_tokens == 0
+        assert result.request_metrics.text.input_tokens == 0
+        assert result.response_metrics is not None
+        assert result.response_metrics.output_tokens == 0
 
     @pytest.mark.asyncio
     async def test_wait_for_predecessors_post_wait_failure_check(self) -> None:
@@ -978,3 +1194,1961 @@ class TestFailurePropagation:
         assert data["session_id"] == "session_1"
         # 3 total - 0 completed before failure - 1 (the failing event itself) = 2 cancelled
         assert data["cancelled_events"] == 2
+
+    @pytest.mark.asyncio
+    async def test_recovered_retry_does_not_fail_the_session(self) -> None:
+        """A retry that recovered must leave no trace in the session's failure state.
+
+        This is the whole point of #777: the blast radius of a transport fault is the
+        rest of the session graph, not the one request. A recovered retry never reaches
+        process_failure, so the session stays alive, downstream events are not
+        cancelled, and nothing is pushed to the completion queue. The counterpart is
+        test_cancelled_count_in_failure_notification above, which shows what an
+        unrecovered fault costs on the same 3-event session.
+        """
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        notifications: List[Any] = []
+        mock_queue = MagicMock()
+        mock_queue.put_nowait = lambda data: notifications.append(data)
+
+        event_0 = self._make_node("session_1:event_0", registry, tracker, total_events=3, completion_queue=mock_queue)
+
+        response = make_mock_response("recovered after retry")
+        config = make_mock_api_config_streaming(streaming=False)
+        tokenizer = make_mock_tokenizer()
+
+        # The client retried internally and the retry answered, so the datagen sees an
+        # ordinary success -- process_failure is never called.
+        await event_0.process_response(response, config, tokenizer)
+
+        assert notifications == []
+        assert tracker.is_session_failed("session_1") is False
+        assert registry.is_event_failed("session_1:event_0") is False
+        # Downstream events see real output, so the rest of the graph still runs.
+        assert registry.get_output_by_event_id("session_1:event_0") == "recovered after retry"
+
+
+# ---------------------------------------------------------------------------
+# Random Session ID Injection tests
+# ---------------------------------------------------------------------------
+
+
+class TestRandomSessionIDInjection:
+    """Test random session ID injection for KV-cache invalidation."""
+
+    def test_random_string_generation_is_unique_per_session(self) -> None:
+        """Each session gets a unique random string, but events in same session share it."""
+        import uuid
+
+        # Generate two different random strings (simulating two different sessions)
+        random_str1 = uuid.uuid4().hex[:16]
+        random_str2 = uuid.uuid4().hex[:16]
+
+        # Verify they are different and correct length
+        assert random_str1 != random_str2
+        assert len(random_str1) == 16
+        assert len(random_str2) == 16
+
+    def test_events_in_same_session_share_random_string(self) -> None:
+        """Events in the same session should use the same random string."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        # Same session random string for both events
+        session_random_str = "a1b2c3d4e5f6g7h8"
+
+        api_data1 = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="Hello")],
+            max_tokens=50,
+            event_id="session_1:event_0",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=2,
+            inject_random_session_id=True,
+            session_random_string=session_random_str,
+        )
+
+        api_data2 = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="World")],
+            max_tokens=50,
+            event_id="session_1:event_1",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=2,
+            inject_random_session_id=True,
+            session_random_string=session_random_str,
+        )
+
+        # Both events in the same session should have the same random string
+        assert api_data1.session_random_string == api_data2.session_random_string
+        assert api_data1.session_random_string == session_random_str
+
+    @pytest.mark.asyncio
+    async def test_unique_segments_get_random_string_injected(self) -> None:
+        """Unique segments have random session string injected when enabled."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        # Create messages with unique segment
+        messages = [
+            {"role": "user", "content": "What is the capital of France?"},
+        ]
+
+        segments = [
+            InputSegment(type="unique", message_count=1, token_count=10, source_event_id=None),
+        ]
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="What is the capital of France?")],
+            max_tokens=50,
+            event_id="session_1:event_0",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=1,
+            inject_random_session_id=True,
+            session_random_string="test123456789abc",  # Provide session random string
+            input_segments=segments,
+            original_messages=messages,
+        )
+
+        # Trigger substitution
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # Message should have random string injected
+        assert len(api_data.messages) == 1
+        assert api_data.messages[0].content is not None
+        assert "[SESS:test123456789abc]" in api_data.messages[0].content
+        assert "What is the capital of France?" in api_data.messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_output_segments_do_not_get_random_string(self) -> None:
+        """Output segments should NOT have random string injected."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        # Register predecessor output
+        registry.record("session_1:event_0", "Paris is the capital.", [])
+
+        # Create messages with output segment
+        messages = [
+            {"role": "user", "content": "What is the capital of France?"},
+            {"role": "assistant", "content": "Original output"},
+        ]
+
+        segments = [
+            InputSegment(type="unique", message_count=1, token_count=10, source_event_id=None),
+            InputSegment(type="output", message_count=1, token_count=5, source_event_id="session_1:event_0"),
+        ]
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[
+                ChatMessage(role="user", content="What is the capital of France?"),
+                ChatMessage(role="assistant", content="Original output"),
+            ],
+            max_tokens=50,
+            event_id="session_1:event_1",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=2,
+            predecessor_event_ids=["session_1:event_0"],
+            inject_random_session_id=True,
+            session_random_string="test123456789abc",  # Provide session random string
+            input_segments=segments,
+            original_messages=messages,
+        )
+
+        # Trigger substitution
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # First message (unique) should have random string
+        assert api_data.messages[0].content is not None
+        assert "[SESS:test123456789abc]" in api_data.messages[0].content
+        # Second message (output) should be substituted but NOT have random string
+        assert api_data.messages[1].content == "Paris is the capital."
+        assert "[SESS:" not in api_data.messages[1].content
+
+    @pytest.mark.asyncio
+    async def test_injection_disabled_by_default(self) -> None:
+        """Random string injection is disabled when inject_random_session_id=False."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        messages = [
+            {"role": "user", "content": "What is the capital of France?"},
+        ]
+
+        segments = [
+            InputSegment(type="unique", message_count=1, token_count=10, source_event_id=None),
+        ]
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="What is the capital of France?")],
+            max_tokens=50,
+            event_id="session_1:event_0",
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=1,
+            inject_random_session_id=False,  # Disabled
+            input_segments=segments,
+            original_messages=messages,
+        )
+
+        # Trigger substitution
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # Message should NOT have random string injected
+        assert api_data.messages[0].content == "What is the capital of France?"
+        assert "[ID:" not in api_data.messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_no_injection_for_original_session_when_flag_disabled(self) -> None:
+        """Case 1: inject_random_session_id=False, original session (not duplicate) -> NO injection."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        messages = [
+            {"role": "user", "content": "What is the capital of France?"},
+        ]
+
+        segments = [
+            InputSegment(type="unique", message_count=1, token_count=10, source_event_id=None),
+        ]
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="What is the capital of France?")],
+            max_tokens=50,
+            event_id="session_001:event_0",  # Original session (no _dup)
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=1,
+            inject_random_session_id=False,  # Flag disabled
+            session_random_string="test123456789abc",  # Random string available but not used
+            input_segments=segments,
+            original_messages=messages,
+        )
+
+        # Trigger substitution
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # Message should NOT have random string injected (flag off, not duplicate)
+        assert api_data.messages[0].content == "What is the capital of France?"
+        assert "[SESS:" not in api_data.messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_injection_for_duplicate_session_when_flag_disabled(self) -> None:
+        """Case 2: inject_random_session_id=False, duplicate session -> YES injection (automatic)."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        messages = [
+            {"role": "user", "content": "What is the capital of France?"},
+        ]
+
+        segments = [
+            InputSegment(type="unique", message_count=1, token_count=10, source_event_id=None),
+        ]
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="What is the capital of France?")],
+            max_tokens=50,
+            event_id="session_001_dup1:event_0",  # Duplicate session (has _dup1)
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=1,
+            inject_random_session_id=False,  # Flag disabled
+            session_random_string="test123456789abc",  # Random string available
+            input_segments=segments,
+            original_messages=messages,
+        )
+
+        # Trigger substitution
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # Message SHOULD have random string injected (duplicate session, automatic)
+        assert api_data.messages[0].content is not None
+        assert "[SESS:test123456789abc]" in api_data.messages[0].content
+        assert "What is the capital of France?" in api_data.messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_injection_for_original_session_when_flag_enabled(self) -> None:
+        """Case 3: inject_random_session_id=True, original session -> YES injection (flag enabled)."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        messages = [
+            {"role": "user", "content": "What is the capital of France?"},
+        ]
+
+        segments = [
+            InputSegment(type="unique", message_count=1, token_count=10, source_event_id=None),
+        ]
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="What is the capital of France?")],
+            max_tokens=50,
+            event_id="session_001:event_0",  # Original session (no _dup)
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=1,
+            inject_random_session_id=True,  # Flag enabled
+            session_random_string="test123456789abc",  # Random string available
+            input_segments=segments,
+            original_messages=messages,
+        )
+
+        # Trigger substitution
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # Message SHOULD have random string injected (flag enabled)
+        assert api_data.messages[0].content is not None
+        assert "[SESS:test123456789abc]" in api_data.messages[0].content
+        assert "What is the capital of France?" in api_data.messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_injection_for_duplicate_session_when_flag_enabled(self) -> None:
+        """Case 4: inject_random_session_id=True, duplicate session -> YES injection (both conditions)."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+
+        messages = [
+            {"role": "user", "content": "What is the capital of France?"},
+        ]
+
+        segments = [
+            InputSegment(type="unique", message_count=1, token_count=10, source_event_id=None),
+        ]
+
+        api_data = SessionChatCompletionAPIData(
+            messages=[ChatMessage(role="user", content="What is the capital of France?")],
+            max_tokens=50,
+            event_id="session_001_dup1:event_0",  # Duplicate session (has _dup1)
+            registry=registry,
+            worker_tracker=tracker,
+            completion_queue=None,
+            total_events_in_session=1,
+            inject_random_session_id=True,  # Flag enabled
+            session_random_string="test123456789abc",  # Random string available
+            input_segments=segments,
+            original_messages=messages,
+        )
+
+        # Trigger substitution
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # Message SHOULD have random string injected (both flag and duplicate)
+        assert api_data.messages[0].content is not None
+        assert "[SESS:test123456789abc]" in api_data.messages[0].content
+        assert "What is the capital of France?" in api_data.messages[0].content
+
+    def test_is_duplicate_session_detection(self) -> None:
+        """Test the _is_duplicate_session() method with various session ID patterns."""
+
+        # Test cases that SHOULD be detected as duplicates
+        assert ReplayGraphSessionGeneratorBase.is_duplicate_session("session_001_dup1") is True
+        assert ReplayGraphSessionGeneratorBase.is_duplicate_session("my_session_dup123") is True
+        assert ReplayGraphSessionGeneratorBase.is_duplicate_session("trace_abc_dup5") is True
+        assert ReplayGraphSessionGeneratorBase.is_duplicate_session("a_dup999") is True
+
+        # Test cases that should NOT be detected as duplicates
+        assert ReplayGraphSessionGeneratorBase.is_duplicate_session("session_001") is False
+        assert ReplayGraphSessionGeneratorBase.is_duplicate_session("my_dup_session") is False  # _dup not at end
+        assert ReplayGraphSessionGeneratorBase.is_duplicate_session("session_dup") is False  # No number after _dup
+        assert (
+            ReplayGraphSessionGeneratorBase.is_duplicate_session("duplicate_session") is False
+        )  # Contains "dup" but wrong pattern
+        assert ReplayGraphSessionGeneratorBase.is_duplicate_session("session_001_duplicate") is False  # Wrong suffix
+
+
+# ---------------------------------------------------------------------------
+# _build_replay_schedule: random session ID assignment for duplicates
+# ---------------------------------------------------------------------------
+
+
+def _make_simple_graph(event_count: int = 1) -> ReplayGraph:
+    """Build a minimal ReplayGraph with `event_count` independent root events."""
+    events: dict[str, GraphEvent] = {}
+    for i in range(event_count):
+        eid = f"event_{i}"
+        events[eid] = GraphEvent(
+            event_id=eid,
+            call=GraphCall(
+                call_id=f"call_{i}",
+                model="test-model",
+                messages=[{"role": "user", "content": f"msg {i}"}],
+                expected_output="ok",
+                input_segments=[InputSegment(type="unique", message_count=1, token_count=5)],
+                total_input_tokens=5,
+                expected_output_tokens=2,
+                temperature=None,
+                max_tokens_recorded=None,
+            ),
+            predecessor_event_ids=[],
+            predecessor_dependency_types={},
+            wait_ms=0,
+            t_start_ms=i * 1000,
+            t_end_ms=i * 1000 + 500,
+        )
+    return ReplayGraph(
+        events=events,
+        root_event_ids=[f"event_{i}" for i in range(event_count)],
+        source_file="test",
+    )
+
+
+def _make_generator(
+    replay_config: Optional[SessionReplayConfig] = None,
+) -> ReplayGraphSessionGeneratorBase:
+    """Create a ReplayGraphSessionGeneratorBase bypassing __init__."""
+    gen = object.__new__(ReplayGraphSessionGeneratorBase)
+    gen.replay_config = replay_config
+    gen.output_registry = EventOutputRegistry()
+    gen.worker_tracker = WorkerSessionTracker()
+    gen.session_completion_queue = None
+    gen.num_workers = 1
+    gen.sessions = []
+    gen._session_ids = []
+    gen.session_graph_state = {}
+    gen._session_events = {}
+    gen.all_events = []
+    gen._skipped_session_count = 0
+    # Corpus-cycling state normally set in __init__, which this helper bypasses.
+    gen._corpus_cycling_enabled = False
+    gen._corpus_session_count = 0
+    gen._cycle_base_ids = []
+    gen._cycle_logged = False
+    return gen
+
+
+class TestCorpusCycling:
+    """Resolving session indices past the loaded corpus, for a duration-bounded stage.
+
+    A stage bounded by time keeps drawing sessions until its deadline, so it asks for
+    indices the corpus does not have. Resolution is pure arithmetic on the index over state
+    fixed before workers fork, which is what lets the parent and every worker agree on what
+    an index means without talking to each other.
+    """
+
+    def _cycling_generator(self, count: int = 3) -> Any:
+        """A minimal lazy generator: slot -> a record it can rebuild from at any time.
+
+        Stands in for otel_trace_replay and synthetic_agentic. The one thing that matters
+        for cycling is that _build_session works from a retained record rather than from a
+        previously built session, so a replay needs nothing kept alive between plays.
+        """
+        gen = _make_generator(replay_config=SessionReplayConfig())
+        records = {i: _make_simple_graph() for i in range(count)}
+
+        def build(session_index: int) -> ReplaySession:
+            slot = session_index % count
+            return ReplaySession(
+                session_id=gen._session_ids[session_index],
+                source_id=f"src{slot}",
+                session_index=session_index,
+                graph=records[slot],
+            )
+
+        gen._build_session = build  # type: ignore[method-assign]
+        gen.initialize_sessions_lazy([f"t{i}" for i in range(count)])
+        return gen
+
+    def test_index_past_the_corpus_resolves_to_a_replay(self) -> None:
+        """index -> (index % corpus) played (index // corpus) times."""
+        gen = self._cycling_generator(count=3)
+        assert gen.supports_corpus_cycling() is True
+
+        gen._register_cycled_slots(7)
+
+        assert gen._session_ids[3] == "t0_dup1"
+        assert gen._session_ids[4] == "t1_dup1"
+        assert gen._session_ids[6] == "t0_dup2"
+        assert gen._session_ids[7] == "t1_dup2"
+
+    def test_replay_ids_are_registered_for_lookup(self) -> None:
+        """build_session_metric resolves a session id back to its index, so the map must grow too."""
+        gen = self._cycling_generator(count=2)
+        gen._register_cycled_slots(3)
+
+        assert gen._session_id_to_index["t0_dup1"] == 2
+        assert gen._session_id_to_index["t1_dup1"] == 3
+
+    def test_a_replay_is_built_from_its_source_slot(self) -> None:
+        """A replay is rebuilt from the source record, not copied from a live session."""
+        gen = self._cycling_generator(count=2)
+
+        # _ensure_session_built is the real entry point: it registers the slot, then builds.
+        gen._ensure_session_built(0)
+        source_graph = gen.sessions[0].graph
+        gen._ensure_session_built(2)
+        replay = gen.sessions[2]
+
+        assert replay is not None
+        assert replay.session_id == "t0_dup1"
+        assert replay.graph is source_graph
+
+    def test_a_replay_does_not_need_its_source_kept_alive(self) -> None:
+        """Nothing is retained between plays, so the corpus does not grow with the run.
+
+        The parent frees each session as it completes. A replay asked for afterwards has to
+        come from the source record -- which is why only the lazy path can cycle.
+        """
+        gen = self._cycling_generator(count=2)
+        gen._ensure_session_built(0)
+        gen.cleanup_session("t0")
+        assert gen.sessions[0] is None, "precondition: the source slot has been freed"
+
+        gen._ensure_session_built(2)
+
+        assert gen.sessions[2] is not None
+
+    def test_session_info_resolves_a_replay_index_on_its_own(self) -> None:
+        """The public accessors must not depend on another call having run first.
+
+        The dispatcher happens to call is_session_buildable() before get_session_info(),
+        and that call grows the index tables as a side effect. Asking for the info first is
+        the same request in a different order, so it has to give the same answer rather than
+        an IndexError.
+        """
+        gen = self._cycling_generator(count=3)
+
+        info = gen.get_session_info(4)
+
+        assert info["session_id"] == "t1_dup1"
+        assert info["session_index"] == 4
+
+    def test_registration_is_idempotent(self) -> None:
+        """Called on every dispatch, and independently in each worker, so it must not double up."""
+        gen = self._cycling_generator(count=3)
+        gen._register_cycled_slots(5)
+        first = list(gen._session_ids)
+
+        gen._register_cycled_slots(5)
+        gen._register_cycled_slots(2)
+
+        assert gen._session_ids == first
+
+    def test_raises_when_the_generator_cannot_cycle(self) -> None:
+        """Cycling is opt-in; without it an out-of-range index is still an error."""
+        gen = _make_generator(replay_config=SessionReplayConfig())
+        gen.sessions = [None]
+        gen._session_ids = ["only"]
+        assert gen.supports_corpus_cycling() is False
+
+        with pytest.raises(IndexError, match="does not support corpus cycling"):
+            gen._register_cycled_slots(5)
+
+
+class TestEagerPathDoesNotCycle:
+    """The eager path builds every session up front, so it cannot serve a replay.
+
+    Cycling re-derives a session from its source record on demand. A generator that
+    already built everything has no record left to re-derive from, so its only way to
+    serve a replay would be to keep the built session alive for the whole run -- which
+    is exactly the memory the parent process frees as sessions complete. Rather than
+    trade that away, the eager path opts out of cycling and a duration-bounded stage on
+    it ends when its corpus does (the runtime warns that the window fell short).
+    """
+
+    def _eager_generator(self, count: int = 3) -> Any:
+        gen = _make_generator(replay_config=SessionReplayConfig())
+        gen.initialize_sessions(
+            [
+                ReplaySession(session_id=f"t{i}", source_id=f"src{i}", session_index=i, graph=_make_simple_graph())
+                for i in range(count)
+            ]
+        )
+        return gen
+
+    def test_eager_corpus_does_not_support_cycling(self) -> None:
+        gen = self._eager_generator()
+        assert gen.supports_corpus_cycling() is False
+
+    def test_index_past_an_eager_corpus_is_an_error(self) -> None:
+        """Not a replay, and not silence either: the same IndexError as before cycling existed."""
+        gen = self._eager_generator()
+        with pytest.raises(IndexError, match="does not support corpus cycling"):
+            gen._register_cycled_slots(5)
+
+    def test_session_info_past_the_corpus_still_raises(self) -> None:
+        """Guard: _get_session dropped its own bounds check, so this must come from the build.
+
+        Removing a bounds check risks silently accepting a bad index. The rejection moved to
+        _ensure_session_built rather than going away, and it has to reach a caller of the
+        public accessor as the same IndexError it always did.
+        """
+        gen = self._eager_generator(count=3)
+        with pytest.raises(IndexError):
+            gen.get_session_info(5)
+
+    def test_session_info_for_a_negative_index_still_raises(self) -> None:
+        """Guard: a negative index is a bug in the caller, never a replay."""
+        gen = self._eager_generator(count=3)
+        with pytest.raises(IndexError):
+            gen.get_session_info(-1)
+
+    def test_completed_session_is_released(self) -> None:
+        """cleanup_session must actually free the session, not just blank its slot.
+
+        The parent holds a dispatched session only between dispatch and completion; over a
+        long run with a large corpus, holding them all is the difference between flat and
+        growing memory. A second list of the same objects kept for cycling would defeat
+        this while leaving every test about slots and ids passing.
+        """
+        gen = self._eager_generator(count=2)
+        watch = weakref.ref(gen.sessions[0])
+
+        gen.cleanup_session("t0")
+        gc.collect()
+
+        assert gen.sessions[0] is None, "the slot is blanked"
+        assert watch() is None, "and nothing else is still holding the session"
+
+
+class TestRealGeneratorBuildsAReplay:
+    """The real OTel builder resolving a replay index, not an injected stand-in.
+
+    TestCorpusCycling injects its own ``_build_session``, so it pins the base class's index
+    arithmetic but never the subclass hook that makes a replay buildable at all:
+    ``_on_cycled_slot`` has to record which corpus slot a replay index copies, because
+    ``_build_session`` reads the trace source through ``_source_indices``. Without that entry a
+    replay would read its own index as a slot -- past the end of the corpus -- so cycling
+    would fail on the first replay, and only against a real corpus.
+    """
+
+    def _generator(self, count: int) -> OTelTraceReplayDataGenerator:
+        gen = object.__new__(OTelTraceReplayDataGenerator)
+        gen.replay_config = SessionReplayConfig()
+        gen.output_registry = EventOutputRegistry()
+        gen.worker_tracker = WorkerSessionTracker()
+        gen.session_completion_queue = None
+        gen.num_workers = 1
+        gen.sessions = []
+        gen._session_ids = []
+        gen.session_graph_state = {}
+        gen._session_events = {}
+        gen.all_events = []
+        gen._skipped_session_count = 0
+        gen._corpus_cycling_enabled = False
+        gen._corpus_session_count = 0
+        gen._cycle_base_ids = []
+        gen._cycle_logged = False
+        # Slot -> row is deliberately not the identity: the real generator shuffles rows, so
+        # a builder that used the index directly would read the wrong trace.
+        rows = [{"tag": f"row{i}"} for i in range(count)]
+        gen._trace_source = MagicMock(load_record=lambda index: rows[index])
+        gen._row_order = [(i + 1) % count for i in range(count)]
+        gen._source_ids = [f"src{i}" for i in range(count)]
+        gen._source_indices = [None] * count
+        gen.initialize_sessions_lazy([f"t{i}" for i in range(count)])
+        return gen
+
+    def test_a_replay_reads_its_source_row_under_its_own_id(self) -> None:
+        """Index 4 of a 3-session corpus builds slot 1's trace, labelled t1_dup1."""
+        gen = self._generator(count=3)
+        captured: dict[str, Any] = {}
+
+        def fake_process(data: dict[str, Any], trace_index: int, session_id: str, source_id: str) -> None:
+            captured.update(data=data, trace_index=trace_index, session_id=session_id, source_id=source_id)
+            return None
+
+        gen._process_trace_data = fake_process  # type: ignore[method-assign]
+
+        gen._register_cycled_slots(4)
+        gen._build_session(4)
+
+        # Slot 1's row, reached through _row_order, not dataset[4] or dataset[1].
+        assert captured["data"] == {"tag": "row2"}
+        assert captured["source_id"] == "src1"
+        # The replay's own id, so its state and its cache marker are its own.
+        assert captured["session_id"] == "t1_dup1"
+        assert captured["trace_index"] == 4
+
+
+class TestBuildReplayScheduleRandomSessionID:
+    """Verify _build_replay_schedule assigns random_string correctly for duplicate sessions."""
+
+    def test_duplicate_sessions_get_random_string_without_flag(self) -> None:
+        """Duplicate sessions (suffix _dup{N}) get a random_string even when inject_random_session_id=False."""
+        graph = _make_simple_graph()
+        gen = _make_generator(replay_config=SessionReplayConfig(inject_random_session_id=False))
+        gen.sessions = [
+            ReplaySession(session_id="sess_001_dup1", source_id="src", session_index=0, graph=graph),
+            ReplaySession(session_id="sess_001_dup2", source_id="src", session_index=1, graph=graph),
+        ]
+
+        gen._build_replay_schedule()
+
+        for sid in ("sess_001_dup1", "sess_001_dup2"):
+            state = gen.session_graph_state[sid]
+            assert state.random_string is not None, f"Duplicate session {sid} should have a random_string"
+            assert len(state.random_string) == 16
+
+    def test_original_session_no_random_string_without_flag(self) -> None:
+        """Original (non-duplicate) sessions have no random_string when inject_random_session_id=False."""
+        graph = _make_simple_graph()
+        gen = _make_generator(replay_config=SessionReplayConfig(inject_random_session_id=False))
+        gen.sessions = [
+            ReplaySession(session_id="sess_001", source_id="src", session_index=0, graph=graph),
+        ]
+
+        gen._build_replay_schedule()
+
+        state = gen.session_graph_state["sess_001"]
+        assert state.random_string is None
+
+    def test_original_session_gets_random_string_with_flag(self) -> None:
+        """Original sessions get a random_string when inject_random_session_id=True."""
+        graph = _make_simple_graph()
+        gen = _make_generator(replay_config=SessionReplayConfig(inject_random_session_id=True))
+        gen.sessions = [
+            ReplaySession(session_id="sess_001", source_id="src", session_index=0, graph=graph),
+        ]
+
+        gen._build_replay_schedule()
+
+        state = gen.session_graph_state["sess_001"]
+        assert state.random_string is not None
+        assert len(state.random_string) == 16
+
+    def test_each_session_gets_unique_random_string(self) -> None:
+        """Every session that receives a random_string gets a distinct value."""
+        graph = _make_simple_graph()
+        gen = _make_generator(replay_config=SessionReplayConfig(inject_random_session_id=True))
+        gen.sessions = [
+            ReplaySession(session_id=f"sess_{i}", source_id="src", session_index=i, graph=graph) for i in range(10)
+        ]
+
+        gen._build_replay_schedule()
+
+        strings = [gen.session_graph_state[f"sess_{i}"].random_string for i in range(10)]
+        assert all(s is not None for s in strings)
+        assert len(set(strings)) == 10, "All random strings should be unique"
+
+    def test_no_random_string_without_replay_config(self) -> None:
+        """No random_string is assigned when replay_config is None, even for duplicates."""
+        graph = _make_simple_graph()
+        gen = _make_generator(replay_config=None)
+        gen.sessions = [
+            ReplaySession(session_id="sess_001_dup1", source_id="src", session_index=0, graph=graph),
+        ]
+
+        gen._build_replay_schedule()
+
+        state = gen.session_graph_state["sess_001_dup1"]
+        # replay_config is None, so the condition `(self.replay_config and ...) or is_duplicate`
+        # still triggers for duplicates because is_duplicate is True regardless of replay_config
+        assert state.random_string is not None
+
+    def test_duplicate_via_initialize_sessions_gets_random_string(self) -> None:
+        """Sessions duplicated by initialize_sessions (duplicate_sessions_target) get random_string."""
+        graph = _make_simple_graph()
+        gen = _make_generator(
+            replay_config=SessionReplayConfig(
+                inject_random_session_id=False,
+                duplicate_sessions_target=3,
+            )
+        )
+
+        original_sessions = [
+            ReplaySession(session_id="sess_001", source_id="src", session_index=0, graph=graph),
+        ]
+
+        gen.initialize_sessions(original_sessions)
+
+        # Should have 3 sessions: 1 original + 2 duplicates
+        assert len(gen.sessions) == 3
+
+        # Original session: no random_string (flag is off, not a duplicate)
+        assert gen.session_graph_state["sess_001"].random_string is None
+
+        # Duplicates: should have random_string
+        dup_states = {sid: state for sid, state in gen.session_graph_state.items() if sid != "sess_001"}
+        assert len(dup_states) == 2
+        for sid, state in dup_states.items():
+            assert state.random_string is not None, f"Duplicate {sid} should have random_string"
+            assert len(state.random_string) == 16
+
+    def test_events_are_created_for_all_sessions_including_duplicates(self) -> None:
+        """_build_replay_schedule creates events for both original and duplicate sessions."""
+        graph = _make_simple_graph(event_count=2)
+        gen = _make_generator(
+            replay_config=SessionReplayConfig(
+                inject_random_session_id=False,
+                duplicate_sessions_target=3,
+            )
+        )
+
+        original_sessions = [
+            ReplaySession(session_id="sess_001", source_id="src", session_index=0, graph=graph),
+        ]
+
+        gen.initialize_sessions(original_sessions)
+
+        # 3 sessions x 2 events each = 6 total events
+        assert len(gen.all_events) == 6
+
+
+# ---------------------------------------------------------------------------
+# bad_tool_call_handling tests
+# ---------------------------------------------------------------------------
+
+# Registry of known server-side tool-call parser bugs that produce malformed
+# `function.arguments` strings. Add new entries here when a new bug pattern
+# is discovered — the parameterized tests below will automatically cover them.
+#
+# Each entry: (id, malformed_args_string, human_readable_description)
+MALFORMED_ARGS_CASES = [
+    (
+        "xml_parser_leak",
+        "</parameter></function>",
+        "vLLM tool parser can leak closing XML markers into the arguments string, thus making it an invalid json",
+    ),
+    (
+        "truncated_mid_string",
+        '{"command": "',
+        "Truncation race in non-streaming concurrent path — arguments string ends mid-JSON",
+    ),
+]
+
+VALID_ARGS = '{"location": "Paris"}'
+
+
+def _make_tool_call(args: str, call_id: str = "call_0", name: str = "get_weather") -> dict[str, Any]:
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": args}}
+
+
+def _make_assistant_message_with_tool_call(args: str, call_id: str = "call_0") -> dict[str, Any]:
+    return {"role": "assistant", "content": None, "tool_calls": [_make_tool_call(args, call_id)]}
+
+
+def _make_api_data_with_tool_call_output(
+    registry: EventOutputRegistry,
+    tracker: WorkerSessionTracker,
+    recorded_args: str,
+    handling: BadToolCallHandling = BadToolCallHandling.USE_RECORDED,
+) -> SessionChatCompletionAPIData:
+    """Two-event chain: event_0 produces a tool_call; event_1 reads it via an output segment."""
+    recorded_assistant = _make_assistant_message_with_tool_call(recorded_args)
+    original_messages = [
+        {"role": "user", "content": "What is the weather?"},
+        recorded_assistant,  # slot that will be substituted
+    ]
+    segments = [
+        InputSegment(type="unique", message_count=1, token_count=5),
+        InputSegment(type="output", message_count=1, token_count=10, source_event_id="session_0:event_0"),
+    ]
+    return SessionChatCompletionAPIData(
+        messages=[
+            ChatMessage(role="user", content="What is the weather?"),
+            ChatMessage(role="assistant", content=None, tool_calls=[_make_tool_call(recorded_args)]),
+        ],
+        max_tokens=50,
+        event_id="session_0:event_1",
+        registry=registry,
+        worker_tracker=tracker,
+        completion_queue=None,
+        total_events_in_session=2,
+        predecessor_event_ids=["session_0:event_0"],
+        input_segments=segments,
+        original_messages=original_messages,
+        override_tool_call_max_tokens=False,
+        bad_tool_call_handling=handling,
+    )
+
+
+class TestBadToolCallHandling:
+    """End-to-end tests for bad_tool_call_handling via wait_for_predecessors_and_substitute.
+
+    Parameterized over MALFORMED_ARGS_CASES so every known parser-bug pattern is
+    covered automatically. To add a new pattern, append an entry to that registry.
+    """
+
+    def _register_live_message(self, registry: EventOutputRegistry, event_id: str, args: str) -> None:
+        """Seed the registry with a live assistant tool_call response."""
+        live_message = _make_assistant_message_with_tool_call(args, call_id="live_call_0")
+        registry.record(event_id, "", [], output_message=live_message)
+
+    @pytest.mark.asyncio
+    async def test_clean_live_tool_call_passes_through(self) -> None:
+        """With use_recorded, a valid live tool_call is used as-is (no substitution)."""
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        self._register_live_message(registry, "session_0:event_0", VALID_ARGS)
+
+        api_data = _make_api_data_with_tool_call_output(registry, tracker, VALID_ARGS)
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # event_1 must not be skipped — valid live args should proceed normally
+        assert not api_data.skip_request
+        # event_1 must not be marked failed in the registry
+        assert not registry.is_event_failed("session_0:event_1")
+        # The live message (valid args) was used directly, not replaced
+        assert api_data.messages[1].tool_calls is not None
+        assert api_data.messages[1].tool_calls[0]["function"]["arguments"] == VALID_ARGS
+        # No substitution fired, so telemetry must be empty
+        assert tracker.get_session_recorded_substitution_event_ids("session_0") == []
+        # No failure reason set
+        assert api_data._substitution_failure_reason is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case_id,malformed_args,desc", MALFORMED_ARGS_CASES)
+    async def test_malformed_live_tool_call_substitutes_recorded(self, case_id: str, malformed_args: str, desc: str) -> None:
+        """Malformed live tool_call arguments are replaced with the recorded assistant message."""
+        print(f"\n[{case_id}] {desc}")
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        # Live response has malformed args; recorded slot (in original_messages) has valid args.
+        self._register_live_message(registry, "session_0:event_0", malformed_args)
+
+        api_data = _make_api_data_with_tool_call_output(registry, tracker, VALID_ARGS)
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # event_1 must not be skipped — recorded fallback was clean so replay can continue
+        assert not api_data.skip_request, f"[{case_id}] should not skip when recorded fallback is clean"
+        # event_1 must not be marked failed in the registry
+        assert not registry.is_event_failed("session_0:event_1")
+        # The recorded message (valid args) was substituted in place of the malformed live one
+        assert api_data.messages[1].tool_calls is not None
+        assert api_data.messages[1].tool_calls[0]["function"]["arguments"] == VALID_ARGS
+        # Telemetry must record event_0 as the predecessor whose live response was replaced
+        subs = tracker.get_session_recorded_substitution_event_ids("session_0")
+        assert "event_0" in subs, f"[{case_id}] substitution telemetry must name the predecessor"
+        # No failure reason set — substitution succeeded cleanly
+        assert api_data._substitution_failure_reason is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case_id,malformed_args,desc", MALFORMED_ARGS_CASES)
+    async def test_malformed_live_and_recorded_hard_fails(self, case_id: str, malformed_args: str, desc: str) -> None:
+        """When both the live response and the recorded fallback are malformed, the event hard-fails exactly once."""
+        print(f"\n[{case_id}] {desc}")
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        # Both live and recorded have the same malformed args — no clean fallback.
+        self._register_live_message(registry, "session_0:event_0", malformed_args)
+
+        api_data = _make_api_data_with_tool_call_output(registry, tracker, malformed_args)
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # event_1 must be skipped — no clean message to send to the model
+        assert api_data.skip_request, f"[{case_id}] must skip when both live and recorded are malformed"
+        # The registry must mark event_1 as failed so downstream events in the DAG cascade-fail
+        assert registry.is_event_failed("session_0:event_1")
+        # No telemetry recorded — the substitution never completed successfully
+        assert tracker.get_session_recorded_substitution_event_ids("session_0") == []
+        # The failure reason must name the recorded fallback specifically, not the generic plain-text message,
+        # so the log is actionable (tells the operator the trace itself was captured from a buggy parser)
+        assert api_data._substitution_failure_reason is not None
+        assert "recorded fallback" in api_data._substitution_failure_reason
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case_id,malformed_args,desc", MALFORMED_ARGS_CASES)
+    async def test_handling_none_does_not_substitute(self, case_id: str, malformed_args: str, desc: str) -> None:
+        """With bad_tool_call_handling=none, malformed args pass through unchanged (upstream behavior)."""
+        print(f"\n[{case_id}] {desc}")
+        registry = EventOutputRegistry()
+        tracker = WorkerSessionTracker()
+        self._register_live_message(registry, "session_0:event_0", malformed_args)
+
+        api_data = _make_api_data_with_tool_call_output(registry, tracker, VALID_ARGS, handling=BadToolCallHandling.NONE)
+        await api_data.wait_for_predecessors_and_substitute()
+
+        # event_1 must not be skipped — handling=none never intervenes regardless of arg validity
+        assert not api_data.skip_request, f"[{case_id}] handling=none must never skip"
+        # event_1 must not be marked failed in the registry
+        assert not registry.is_event_failed("session_0:event_1")
+        # The live malformed args passed through byte-for-byte; no recorded fallback was consulted
+        assert api_data.messages[1].tool_calls is not None
+        assert api_data.messages[1].tool_calls[0]["function"]["arguments"] == malformed_args
+        # No substitution fired, so telemetry must be empty
+        assert tracker.get_session_recorded_substitution_event_ids("session_0") == []
+        # No failure reason set
+        assert api_data._substitution_failure_reason is None
+
+
+class TestWorkerSessionEviction:
+    """Verify a worker frees a session's built graph once all its events drain.
+
+    In the lazy path each worker builds its own graphs and the parent's cleanup_session
+    never runs in the worker, so without per-worker eviction a worker retains every graph
+    it ever built for the whole stage. evict_worker_session (triggered when the last event
+    of a session drains) must free the graph, event list, traversal state, registry entries,
+    and worker-tracker bookkeeping. Every event drains exactly once via completion, skip, or
+    request failure — eviction fires only after the last of them.
+    """
+
+    def _session_is_resident(self, gen: ReplayGraphSessionGeneratorBase, session_id: str, idx: int) -> bool:
+        return (
+            session_id in gen.session_graph_state
+            or idx in gen._session_events
+            or (idx < len(gen.sessions) and gen.sessions[idx] is not None)
+        )
+
+    def test_evicted_after_all_events_complete(self) -> None:
+        """A 2-event session is freed only after both events complete, not after the first."""
+        graph = _make_simple_graph(event_count=2)
+        gen = _make_generator()
+        gen.initialize_sessions([ReplaySession(session_id="s", source_id="src", session_index=0, graph=graph)])
+        assert self._session_is_resident(gen, "s", 0)
+
+        events = gen.get_session_events(0)
+        assert len(events) == 2
+        datas = [gen.load_lazy_data(e) for e in events]
+        for d in datas:
+            assert isinstance(d, SessionChatCompletionAPIData)
+            assert d.generator is gen  # back-reference wired
+
+        info = SessionInferenceInfo(output_text="x", request_metrics=RequestMetrics(text=Text(input_tokens=1)))
+        # First event completes — session must still be resident.
+        datas[0].on_completion(info)
+        assert self._session_is_resident(gen, "s", 0), "session evicted too early (before last event)"
+
+        # Last event completes — now fully drained, must be evicted.
+        datas[1].on_completion(info)
+        assert not self._session_is_resident(gen, "s", 0), "session not evicted after all events completed"
+        assert "s" not in gen.worker_tracker._drained_events
+
+    def test_evicted_after_failure_and_skips_drain(self) -> None:
+        """Root failure + successor skips still drain every event, so the session is freed."""
+        graph = _make_simple_graph(event_count=3)
+        gen = _make_generator()
+        gen.initialize_sessions([ReplaySession(session_id="s", source_id="src", session_index=0, graph=graph)])
+
+        events = gen.get_session_events(0)
+        datas = [gen.load_lazy_data(e) for e in events]
+
+        # Root event fails (request failure path).
+        asyncio.run(datas[0].process_failure(None, make_mock_api_config_streaming(), make_mock_tokenizer(), Exception("boom")))
+        assert self._session_is_resident(gen, "s", 0), "evicted before successors drained"
+
+        # The two successors are dequeued and skip via the session-already-failed path.
+        for d in datas[1:]:
+            assert isinstance(d, SessionChatCompletionAPIData)
+            asyncio.run(d.wait_for_predecessors_and_substitute())
+            assert d.skip_request is True
+
+        # All three events have now drained — session must be evicted.
+        assert not self._session_is_resident(gen, "s", 0), "session not evicted after failure + skips"
+
+
+class TestUnbuildableSessionSlot:
+    """Regression tests for the three bugs around un-buildable lazy session slots.
+
+    Bug 1 (dispatch crash): dispatch_session calls get_session_info after is_session_buildable
+    returns False; get_session_info → _get_session raises RuntimeError for a None slot.
+
+    Bug 2 (eviction never fires): total_events_in_session is taken from len(state.graph.events)
+    but _build_session_schedule skips empty-message events, so the drain counter never reaches
+    the inflated total and evict_worker_session never fires.
+
+    Bug 3 (repeated _build_session): _ensure_session_built short-circuits on
+    `sessions[idx] is not None` only; un-buildable slots stay None so _build_session is
+    re-invoked on every subsequent call.
+    """
+
+    def test_ensure_session_built_does_not_repeat_for_unbuildable_slot(self) -> None:
+        """Bug 3: _build_session must be called at most once per slot even if it returns None."""
+        gen = _make_generator()
+        gen.initialize_sessions_lazy(["bad_session"])
+
+        build_calls = 0
+
+        def failing_build(idx: int) -> None:
+            nonlocal build_calls
+            build_calls += 1
+            return None
+
+        gen._build_session = failing_build  # type: ignore[assignment]
+
+        # First call — attempts build, finds nothing.
+        gen._ensure_session_built(0)
+        assert build_calls == 1
+
+        # Subsequent calls — slot already attempted, must NOT re-invoke _build_session.
+        gen._ensure_session_built(0)
+        gen._ensure_session_built(0)
+        assert build_calls == 1, f"_build_session re-invoked {build_calls} times for an un-buildable slot"
+
+    def test_is_session_buildable_returns_false_without_crashing(self) -> None:
+        """Bug 3 + Bug 1 precondition: is_session_buildable must return False cleanly."""
+        gen = _make_generator()
+        gen.initialize_sessions_lazy(["bad_session"])
+        gen._build_session = lambda idx: None  # type: ignore[assignment]
+
+        assert not gen.is_session_buildable(0)
+        # _session_ids must still be intact after a failed build (used by dispatch to
+        # add the session to completed_session_ids without touching the None slot).
+        assert gen._session_ids[0] == "bad_session"
+
+    def test_eviction_fires_despite_empty_message_event(self) -> None:
+        """Bug 2: evict_worker_session must fire even when one graph event has no messages.
+
+        _build_session_schedule skips empty-message events (they are never dispatched),
+        so total_events_in_session must be derived from the scheduled count — not from
+        len(state.graph.events) — otherwise the drain counter never reaches the total
+        and the session is never evicted.
+        """
+        # Build a graph where event_0 has no messages (will be skipped by schedule builder)
+        # and event_1 has messages (will be dispatched and drained).
+        events: dict[str, GraphEvent] = {
+            "event_0": GraphEvent(
+                event_id="event_0",
+                call=GraphCall(
+                    call_id="call_0",
+                    model="test-model",
+                    messages=[],  # empty — skipped by _build_session_schedule
+                    expected_output="",
+                    input_segments=[],
+                    total_input_tokens=0,
+                    expected_output_tokens=0,
+                    temperature=None,
+                    max_tokens_recorded=None,
+                ),
+                predecessor_event_ids=[],
+                predecessor_dependency_types={},
+                wait_ms=0,
+                t_start_ms=0,
+                t_end_ms=500,
+            ),
+            "event_1": GraphEvent(
+                event_id="event_1",
+                call=GraphCall(
+                    call_id="call_1",
+                    model="test-model",
+                    messages=[{"role": "user", "content": "hello"}],
+                    expected_output="ok",
+                    input_segments=[InputSegment(type="unique", message_count=1, token_count=5)],
+                    total_input_tokens=5,
+                    expected_output_tokens=2,
+                    temperature=None,
+                    max_tokens_recorded=None,
+                ),
+                predecessor_event_ids=[],
+                predecessor_dependency_types={},
+                wait_ms=0,
+                t_start_ms=1000,
+                t_end_ms=1500,
+            ),
+        }
+        graph = ReplayGraph(events=events, root_event_ids=["event_0", "event_1"], source_file="test")
+
+        gen = _make_generator()
+        gen.initialize_sessions([ReplaySession(session_id="s", source_id="src", session_index=0, graph=graph)])
+
+        # Only event_1 is scheduled (event_0 has no messages).
+        scheduled = gen.get_session_events(0)
+        assert len(scheduled) == 1, f"expected 1 scheduled event, got {len(scheduled)}"
+
+        data = gen.load_lazy_data(scheduled[0])
+        assert isinstance(data, SessionChatCompletionAPIData)
+        assert data.generator is gen
+
+        # total_events_in_session must equal the scheduled count (1), not len(graph.events) (2).
+        assert data.total_events_in_session == 1, (
+            f"total_events_in_session is {data.total_events_in_session}; "
+            "should be 1 (scheduled) not 2 (raw graph) — otherwise eviction never fires"
+        )
+
+        # Draining the one scheduled event must trigger eviction.
+        info = SessionInferenceInfo(output_text="x", request_metrics=RequestMetrics(text=Text(input_tokens=1)))
+        data.on_completion(info)
+        assert "s" not in gen.session_graph_state, "session not evicted after its only scheduled event completed"
+
+    def test_is_session_buildable_returns_false_for_zero_event_session(self) -> None:
+        """Bug 5: a session whose graph builds but schedules zero events must not be dispatched.
+
+        If is_session_buildable returns True for such a session, dispatch adds it to
+        active_session_indices but no worker events ever fire, so check_session_completed
+        never returns True and the stage stalls until timeout.
+        """
+        # All events have empty messages — _build_session_schedule will skip every one.
+        events: dict[str, GraphEvent] = {
+            "event_0": GraphEvent(
+                event_id="event_0",
+                call=GraphCall(
+                    call_id="call_0",
+                    model="test-model",
+                    messages=[],
+                    expected_output="",
+                    input_segments=[],
+                    total_input_tokens=0,
+                    expected_output_tokens=0,
+                    temperature=None,
+                    max_tokens_recorded=None,
+                ),
+                predecessor_event_ids=[],
+                predecessor_dependency_types={},
+                wait_ms=0,
+                t_start_ms=0,
+                t_end_ms=500,
+            ),
+        }
+        graph = ReplayGraph(events=events, root_event_ids=["event_0"], source_file="test")
+        gen = _make_generator()
+        gen.initialize_sessions([ReplaySession(session_id="s", source_id="src", session_index=0, graph=graph)])
+
+        # Graph built successfully (session is not None) but zero events scheduled.
+        assert gen.sessions[0] is not None, "session should have been built"
+        assert gen._session_events.get(0, []) == [], "expected zero scheduled events"
+
+        # is_session_buildable must return False to prevent a stalled stage.
+        assert not gen.is_session_buildable(0), (
+            "is_session_buildable returned True for a zero-event session — "
+            "dispatch would add it to active_session_indices with nothing to complete it"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Structured tool-call preservation through the real graph-build path.
+#
+# These tests exercise extract_messages -> build_graph (via build_raw_calls)
+# and assert on GraphCall.messages — the dicts that become the wire payload.
+# They guard against _replay_message_to_dict flattening recorded tool calls
+# into the internal "<|tool_call|>...<|end|>" marker string, which would drop
+# structured tool_calls and tool-result tool_call_id linkage.
+# ---------------------------------------------------------------------------
+
+
+def _graph_messages_from_input(input_messages: List[dict[str, Any]]) -> List[dict[str, Any]]:
+    """Run input messages through the real span-extraction + graph builder and
+    return the resulting GraphCall.messages (the wire dicts)."""
+    span = {
+        "trace_id": "t",
+        "span_id": "s",
+        "parent_span_id": None,
+        "name": "chat gpt-4",
+        "start_time": "2026-01-01T00:00:00.000000",
+        "end_time": "2026-01-01T00:00:01.000000",
+        "attributes": {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": "gpt-4",
+            "gen_ai.input.messages": json.dumps(input_messages),
+            "gen_ai.output.text": "ok",
+        },
+        "resource_attributes": {"service.name": "t"},
+        "status": {"code": 1, "message": ""},
+    }
+    raw_calls, _ = build_raw_calls([span])
+    graph = build_graph(raw_calls, source_file="t")
+    return next(iter(graph.events.values())).call.messages
+
+
+class TestStructuredToolCallPreservation:
+    """GraphCall.messages must carry structured tool_calls / tool_call_id."""
+
+    @pytest.mark.parametrize("container", ["parts", "content"])
+    @pytest.mark.parametrize("role", ["tool", "user"])
+    @pytest.mark.parametrize(
+        ("fields", "expected"),
+        [
+            ({"response": "sunny"}, "sunny"),
+            ({"response": [{"type": "text", "text": "sunny"}]}, "sunny"),
+            ({"response": {"temp_c": 18}}, "{'temp_c': 18}"),
+            ({"response": ""}, ""),
+            ({"response": None}, ""),
+            ({"result": "legacy", "response": "standard"}, "legacy"),
+            ({"result": "", "response": "standard"}, ""),
+            ({}, ""),
+        ],
+    )
+    def test_tool_response_fields(self, container: str, role: str, fields: dict[str, Any], expected: str) -> None:
+        msgs = _graph_messages_from_input([{"role": role, container: [{"type": "tool_call_response", "id": "c1", **fields}]}])
+        assert msgs == [{"role": "tool", "tool_call_id": "c1", "content": expected}]
+
+    def test_assistant_tool_calls_only_openai_format(self) -> None:
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "user", "content": "weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+                        }
+                    ],
+                },
+            ]
+        )
+        assistant = msgs[1]
+        assert "<|tool_call|>" not in json.dumps(assistant), "tool call must not be flattened to marker text"
+        assert assistant["tool_calls"][0]["id"] == "c1"
+        assert assistant["tool_calls"][0]["function"]["name"] == "get_weather"
+        assert assistant["tool_calls"][0]["function"]["arguments"] == '{"city": "Paris"}'
+
+    def test_assistant_content_plus_tool_calls(self) -> None:
+        msgs = _graph_messages_from_input(
+            [
+                {
+                    "role": "assistant",
+                    "content": "Let me check.",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+                        }
+                    ],
+                },
+            ]
+        )
+        assistant = msgs[0]
+        assert "<|tool_call|>" not in json.dumps(assistant)
+        assert assistant["tool_calls"][0]["function"]["name"] == "get_weather"
+        # Preamble text is preserved alongside the structured call.
+        assert "Let me check." in assistant.get("content", "")
+
+    def test_assistant_tool_calls_direct_format(self) -> None:
+        msgs = _graph_messages_from_input(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{"id": "c1", "name": "get_weather", "arguments": '{"city": "Paris"}'}],
+                },
+            ]
+        )
+        assistant = msgs[0]
+        assert "<|tool_call|>" not in json.dumps(assistant)
+        assert assistant["tool_calls"][0]["function"]["name"] == "get_weather"
+        assert assistant["tool_calls"][0]["function"]["arguments"] == '{"city": "Paris"}'
+
+    def test_tool_result_parts_list_keeps_tool_call_id(self) -> None:
+        msgs = _graph_messages_from_input(
+            [
+                {
+                    "role": "tool",
+                    "content": [{"type": "tool_call_response", "id": "c1", "result": '{"temp_c": 18}'}],
+                },
+            ]
+        )
+        tool_msg = msgs[0]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["tool_call_id"] == "c1"
+        assert "18" in tool_msg.get("content", "")
+
+    def test_tool_result_string_content_keeps_tool_call_id(self) -> None:
+        # A role:tool result with STRING content + a sibling tool_call_id must
+        # retain tool_call_id on the wire (previously it became a plain
+        # ReplayMessage in extract_messages and the id was dropped).
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "tool", "tool_call_id": "c1", "content": '{"temp_c": 18}'},
+            ]
+        )
+        tool_msg = msgs[0]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["tool_call_id"] == "c1"
+        assert "18" in tool_msg.get("content", "")
+
+    def test_tool_call_object_arguments_serialized_to_json_string(self) -> None:
+        # OpenAI/vLLM require function.arguments to be a JSON string. Recorded
+        # traces often carry it as a parsed object; it must be serialised, not
+        # passed through as an object (which triggers a 400 on the server).
+        msgs = _graph_messages_from_input(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "make_todos", "arguments": {"todos": ["a", "b"]}},
+                        }
+                    ],
+                },
+            ]
+        )
+        args = msgs[0]["tool_calls"][0]["function"]["arguments"]
+        assert isinstance(args, str), "arguments must be a JSON string, not an object"
+        assert json.loads(args) == {"todos": ["a", "b"]}
+
+    def test_tool_result_with_nested_block_list_result(self) -> None:
+        # A tool_call_response whose `result` is itself a list of content blocks
+        # (e.g. [{"type": "text", "text": "..."}]) must flatten to string content,
+        # not crash the "".join and not leave a list on the wire.
+        msgs = _graph_messages_from_input(
+            [
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool_call_response",
+                            "id": "c1",
+                            "result": [{"type": "text", "text": '{"temp_c": 18}'}],
+                        }
+                    ],
+                },
+            ]
+        )
+        tool_msg = msgs[0]
+        assert tool_msg["tool_call_id"] == "c1"
+        assert isinstance(tool_msg.get("content"), str)
+        assert "18" in tool_msg["content"]
+
+    def test_tool_call_missing_id_skips_trace(self) -> None:
+        # A tool_call with no id cannot be replayed faithfully (OpenAI/vLLM reject
+        # tool_calls[].id=null with a 400, and the role:tool result is linked by
+        # that id). build_graph's caller wraps build_graph in try/except and skips
+        # the trace, so _normalize_tool_call must raise rather than emit id:null.
+        with pytest.raises(ValueError, match="no id"):
+            _graph_messages_from_input(
+                [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [{"type": "function", "function": {"name": "get_weather", "arguments": "{}"}}],
+                    },
+                ]
+            )
+
+    def test_tool_call_non_dict_function_does_not_crash(self) -> None:
+        # A malformed tool_call whose `function` is a bare string (not a nested
+        # dict) must not raise AttributeError; it falls back to the direct/parts
+        # shape (top-level name/arguments).
+        msgs = _graph_messages_from_input(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{"id": "c1", "function": "get_weather", "name": "get_weather", "arguments": "{}"}],
+                },
+            ]
+        )
+        assert msgs[0]["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    def test_tool_result_on_user_role_parts_format_normalizes_to_tool(self) -> None:
+        # Anthropic-native harnesses put a tool result on a
+        # role:user message, rather than a dedicated
+        # role:tool message. The OpenAI-compatible wire target only defines tool results as role:tool
+        # messages, so the emitted role must be normalized.
+        msgs = _graph_messages_from_input(
+            [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "type": "tool_call_response",
+                            "id": "call_cad5f02bc9c8424abdc072de",
+                            "result": '[{"type": "text", "text": "Todos have been modified successfully."}]',
+                        }
+                    ],
+                },
+            ]
+        )
+        tool_msg = msgs[0]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["tool_call_id"] == "call_cad5f02bc9c8424abdc072de"
+        assert "Todos have been modified successfully" in tool_msg["content"]
+
+    def test_tool_result_on_user_role_content_list_format_normalizes_to_tool(self) -> None:
+        # Same normalization as above, but for the raw-dict "content" list shape
+        # (Shape 2) rather than the "parts" shape (Shape 1).
+        msgs = _graph_messages_from_input(
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_call_response", "id": "c1", "result": '{"temp_c": 18}'}],
+                },
+            ]
+        )
+        tool_msg = msgs[0]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["tool_call_id"] == "c1"
+        assert "18" in tool_msg.get("content", "")
+
+    def test_multiple_tool_results_keeps_first(self) -> None:
+        # One OpenAI wire message answers exactly one tool_call_id. A message that
+        # bundles several tool_call_response parts keeps the FIRST (id + result)
+        # and drops the rest, rather than concatenating results under one id.
+        msgs = _graph_messages_from_input(
+            [
+                {
+                    "role": "tool",
+                    "content": [
+                        {"type": "tool_call_response", "id": "c1", "result": "first"},
+                        {"type": "tool_call_response", "id": "c2", "result": "second"},
+                    ],
+                },
+            ]
+        )
+        tool_msg = msgs[0]
+        assert tool_msg["tool_call_id"] == "c1"
+        assert tool_msg["content"] == "first"
+        assert "second" not in tool_msg["content"]
+
+    def test_tool_call_id_not_leaked_onto_user_message(self) -> None:
+        # tool_call_id belongs on a role:tool message only. A role:user message
+        # carrying a stray tool_call_id must not emit it on the wire (OpenAI/vLLM
+        # reject tool_call_id on non-tool roles).
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "user", "tool_call_id": "c1", "content": "hello"},
+            ]
+        )
+        assert "tool_call_id" not in msgs[0]
+
+
+class TestLoadLazyDataPreservesToolLinkage:
+    """load_lazy_data must build ChatMessages (the wire payload when no
+    substitution runs, e.g. disable_output_substitution=true) that retain
+    tool_call_id and structured tool_calls — not just original_messages."""
+
+    def _make_gen_from_input(self, input_messages: List[dict[str, Any]]) -> Any:
+        span = {
+            "trace_id": "t",
+            "span_id": "s",
+            "parent_span_id": None,
+            "name": "chat gpt-4",
+            "start_time": "2026-01-01T00:00:00.000000",
+            "end_time": "2026-01-01T00:00:01.000000",
+            "attributes": {
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": "gpt-4",
+                "gen_ai.input.messages": json.dumps(input_messages),
+                "gen_ai.output.text": "ok",
+            },
+            "resource_attributes": {"service.name": "t"},
+            "status": {"code": 1, "message": ""},
+        }
+        raw_calls, _ = build_raw_calls([span])
+        graph = build_graph(raw_calls, source_file="t")
+        session_id = "session_0"
+        gc = next(iter(graph.events.values()))
+        event = ReplaySessionEvent(
+            call_id=gc.call.call_id,
+            event_id=f"{session_id}:{gc.event_id}",
+            session_index=0,
+            t_start_ms=gc.t_start_ms,
+            t_end_ms=gc.t_end_ms,
+            model=gc.call.model,
+            messages=gc.call.messages,
+            expected_output=gc.call.expected_output,
+            input_segments=gc.call.input_segments,
+            expected_output_tokens=gc.call.expected_output_tokens,
+            temperature=gc.call.temperature,
+            max_tokens_recorded=gc.call.max_tokens_recorded,
+            predecessor_event_ids=[],
+            wait_ms=0,
+        )
+        gen = object.__new__(OTelTraceReplayDataGenerator)
+        gen.all_events = [event]
+        gen._session_events = {0: [event]}
+        gen.output_registry = EventOutputRegistry()
+        gen.worker_tracker = WorkerSessionTracker()
+        gen.session_completion_queue = None
+        gen.api_config = make_api_config()
+        cfg = MagicMock()
+        cfg.attribute_to_header_map = {}
+        cfg.attribute_to_label_map = {}
+        cfg.bad_tool_call_handling = BadToolCallHandling.NONE
+        cfg.tool_choice_mode = ToolChoiceMode.FORCE_RECORDED
+        gen.otel_config = cfg
+        gen.replay_config = cfg
+        gen.session_graph_state = {session_id: MagicMock(graph=graph, random_string=None)}
+        return gen
+
+    def test_tool_result_chatmessage_keeps_tool_call_id(self) -> None:
+        from inference_perf.apis import LazyLoadInferenceAPIData
+
+        gen = self._make_gen_from_input(
+            [
+                {"role": "user", "content": "weather?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}],
+                },
+                {"role": "tool", "tool_call_id": "c1", "content": '{"temp_c": 18}'},
+            ]
+        )
+        api_data = gen.load_lazy_data(LazyLoadInferenceAPIData(data_index=0))
+        # The role:tool ChatMessage must carry tool_call_id (the wire payload
+        # when disable_output_substitution=true skips the substitution rebuild).
+        tool_cm = next(m for m in api_data.messages if m.role == "tool")
+        assert tool_cm.tool_call_id == "c1"
+        assert "tool_call_id" in tool_cm.to_dict()
+        # The assistant ChatMessage must carry structured tool_calls.
+        asst_cm = next(m for m in api_data.messages if m.role == "assistant")
+        assert asst_cm.tool_calls is not None
+        assert asst_cm.tool_calls[0]["function"]["name"] == "get_weather"
+
+
+class TestDisableOutputSubstitutionValidation:
+    """disable_output_substitution contradicts random session-ID injection, so
+    the config validator must reject the combination up front rather than let
+    the substitution pass run anyway (and silently ignore the flag)."""
+
+    def test_disable_substitution_alone_is_valid(self) -> None:
+        cfg = OTelTraceReplayConfig(trace_files=["/tmp/t.json"], disable_output_substitution=True)
+        assert cfg.disable_output_substitution is True
+
+    def test_disable_substitution_with_random_injection_raises(self) -> None:
+        with pytest.raises(ValidationError, match="inject_random_session_id"):
+            OTelTraceReplayConfig(
+                trace_files=["/tmp/t.json"],
+                disable_output_substitution=True,
+                inject_random_session_id=True,
+            )
+
+    def test_disable_substitution_with_duplicate_sessions_raises(self) -> None:
+        with pytest.raises(ValidationError, match="duplicate_sessions_target"):
+            OTelTraceReplayConfig(
+                trace_files=["/tmp/t.json"],
+                disable_output_substitution=True,
+                duplicate_sessions_target=10,
+            )
+
+    def test_random_injection_without_disable_substitution_is_valid(self) -> None:
+        cfg = OTelTraceReplayConfig(
+            trace_files=["/tmp/t.json"],
+            inject_random_session_id=True,
+            duplicate_sessions_target=10,
+        )
+        assert cfg.disable_output_substitution is False
+
+
+# ---------------------------------------------------------------------------
+# Parallel tool results: one recorded message can bundle N tool results (how a
+# provider answers parallel tool calls). OpenAI represents those as N
+# consecutive role:tool messages, one per tool_call_id, so _replay_message_to_dict
+# must fan them out rather than keep the first and drop the rest.
+#
+# vLLM and OpenAI-compatible simulators do not validate call/response
+# cardinality, so dropping results replays a silently truncated conversation and
+# understates prompt tokens. Vertex/Gemini does validate it and rejects the
+# payload with "the number of function response parts is equal to the number of
+# function call parts of the function call turn".
+# ---------------------------------------------------------------------------
+
+
+def _assistant_with_tool_calls(ids: List[str]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "tool_calls": [
+            {"id": tc_id, "type": "function", "function": {"name": f"fn_{i}", "arguments": "{}"}}
+            for i, tc_id in enumerate(ids)
+        ],
+    }
+
+
+class TestParallelToolResultsFanOut:
+    """A message bundling N tool results must become N role:tool messages."""
+
+    def test_two_parallel_tool_results_become_two_tool_messages(self) -> None:
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "user", "content": "list and read"},
+                _assistant_with_tool_calls(["call_a", "call_b"]),
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_call_response", "id": "call_a", "result": "result A"},
+                        {"type": "tool_call_response", "id": "call_b", "result": "result B"},
+                    ],
+                },
+            ]
+        )
+        tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+        assert len(tool_msgs) == 2, f"expected 2 role:tool messages, got {len(tool_msgs)}: {msgs}"
+        assert [m["tool_call_id"] for m in tool_msgs] == ["call_a", "call_b"]
+        assert [m["content"] for m in tool_msgs] == ["result A", "result B"]
+
+    def test_three_parallel_tool_results_preserve_recorded_order(self) -> None:
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "user", "content": "fan out"},
+                _assistant_with_tool_calls(["call_1", "call_2", "call_3"]),
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_call_response", "id": "call_1", "result": "r1"},
+                        {"type": "tool_call_response", "id": "call_2", "result": "r2"},
+                        {"type": "tool_call_response", "id": "call_3", "result": "r3"},
+                    ],
+                },
+            ]
+        )
+        tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+        assert [m["tool_call_id"] for m in tool_msgs] == ["call_1", "call_2", "call_3"]
+
+    def test_tool_result_count_matches_tool_call_count(self) -> None:
+        """The cardinality invariant Vertex/Gemini enforces on the wire."""
+        ids = ["call_x", "call_y"]
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "user", "content": "go"},
+                _assistant_with_tool_calls(ids),
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_call_response", "id": i, "result": f"r-{i}"} for i in ids],
+                },
+            ]
+        )
+        assistant = next(m for m in msgs if m.get("role") == "assistant")
+        tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+        assert len(tool_msgs) == len(assistant["tool_calls"])
+        assert [m["tool_call_id"] for m in tool_msgs] == [c["id"] for c in assistant["tool_calls"]]
+
+    def test_tool_messages_directly_follow_their_assistant_message(self) -> None:
+        """Results must be positionally adjacent to the call that produced them."""
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "user", "content": "go"},
+                _assistant_with_tool_calls(["call_a", "call_b"]),
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_call_response", "id": "call_a", "result": "A"},
+                        {"type": "tool_call_response", "id": "call_b", "result": "B"},
+                    ],
+                },
+            ]
+        )
+        idx = next(i for i, m in enumerate(msgs) if m.get("role") == "assistant")
+        assert msgs[idx + 1]["role"] == "tool"
+        assert msgs[idx + 2]["role"] == "tool"
+
+    def test_text_bundled_with_tool_results_is_not_lost(self) -> None:
+        """Text sharing a message with results has no role:tool slot of its own."""
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "user", "content": "go"},
+                _assistant_with_tool_calls(["call_a", "call_b"]),
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "content": "here you go: "},
+                        {"type": "tool_call_response", "id": "call_a", "result": "A"},
+                        {"type": "tool_call_response", "id": "call_b", "result": "B"},
+                    ],
+                },
+            ]
+        )
+        tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+        assert len(tool_msgs) == 2
+        assert "here you go: " in tool_msgs[0]["content"]
+        assert tool_msgs[1]["content"] == "B"
+
+
+class TestSingleToolResultUnchanged:
+    """Regression guard: the 1-result and 0-result paths must not shift."""
+
+    def test_single_tool_result_still_one_tool_message(self) -> None:
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "user", "content": "go"},
+                _assistant_with_tool_calls(["call_only"]),
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_call_response", "id": "call_only", "result": "just one"}],
+                },
+            ]
+        )
+        tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0] == {"role": "tool", "tool_call_id": "call_only", "content": "just one"}
+
+    def test_plain_conversation_has_no_tool_messages(self) -> None:
+        msgs = _graph_messages_from_input(
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ]
+        )
+        assert [m["role"] for m in msgs] == ["system", "user", "assistant"]
+        assert all("tool_call_id" not in m for m in msgs)
+
+
+def _queue_of(*payloads: dict[str, Any]) -> Any:
+    """A completion queue that hands out payloads once, then reports empty, as the real one does."""
+    import queue
+
+    q: "queue.Queue[dict[str, Any]]" = queue.Queue()
+    for payload in payloads:
+        q.put(payload)
+    return q
+
+
+class TestTruncatedSessionReporting:
+    """A session cut short at the stage boundary must still report what it got through.
+
+    Such a session is deliberately kept out of the success/failure counts, but that is a
+    statement about aggregates, not a reason to report nothing about the session itself.
+    Two separate things used to erase its picture: the worker only reports a session once
+    it finishes, so a cut-short one was never reported at all, and build_session_metric
+    zeroed the cancellation count for anything that was not an outright failure.
+    """
+
+    def _state(self, completed: set[str], num_events: int = 4, complete: bool = False, failed: bool = False) -> Any:
+        graph = MagicMock()
+        graph.events = {
+            f"event_{i}": MagicMock(is_user_facing=False, is_structured_output_call=False) for i in range(num_events)
+        }
+        return ReplaySessionState(
+            session_id="session_1",
+            graph=graph,
+            ready_events=set(),
+            dispatched_events=set(),
+            completed_events=set(completed),
+            event_completion_times={e: 1.0 for e in completed},
+            is_active=True,
+            is_complete=complete,
+            failed=failed,
+        )
+
+    def _generator(self, state: Any) -> OTelTraceReplayDataGenerator:
+        gen = object.__new__(OTelTraceReplayDataGenerator)
+        gen.session_graph_state = {"session_1": state}
+        gen.sessions = []
+        gen._session_id_to_index = {"session_1": 0}
+        gen._session_events = {}
+        return gen
+
+    def test_source_id_is_found_without_scanning_the_session_slots(self) -> None:
+        """A replay deep into a cycling run is resolved through the index, not a scan.
+
+        Cycling appends a slot per replay and cleanup leaves finished ones as None, so the
+        slot list grows for the whole run. Walking it to find one session made each lookup
+        longer than the last, and the total work quadratic over a long run.
+        """
+
+        class _RefusesScan(list):  # type: ignore[type-arg]
+            def __iter__(self) -> Any:
+                raise AssertionError("build_session_metric walked the session slots")
+
+        gen = self._generator(self._state(completed={"event_0"}))
+        session = MagicMock(session_id="session_1", source_id="src_1")
+        gen.sessions = _RefusesScan([None] * 999 + [session])
+        gen._session_id_to_index = {"session_1": 999}
+
+        metric = gen.build_session_metric(session_id="session_1", stage_id=0, start_time=0.0, end_time=5.0)
+
+        assert metric.file_path == "src_1"
+
+    def test_session_end_is_the_latest_recorded_event(self) -> None:
+        """The real end of a session is when its last event landed, whatever order they ran."""
+        state = self._state(completed={"event_0", "event_1", "event_2"})
+        state.event_completion_times = {"event_0": 3.0, "event_1": 7.5, "event_2": 5.0}
+        gen = self._generator(state)
+
+        assert gen.session_end_perf_counter("session_1") == 7.5
+        assert gen.session_end_perf_counter("unknown") is None
+
+    def test_session_end_is_none_before_anything_lands(self) -> None:
+        gen = self._generator(self._state(completed=set()))
+
+        assert gen.session_end_perf_counter("session_1") is None
+
+    def test_a_session_whose_last_request_failed_ends_at_the_failure(self) -> None:
+        """A failure lands no event completion, so the terminal notification is what dates it.
+
+        Request A succeeds at t=1 and request B fails at t=5: the session ran until 5.
+        """
+        state = self._state(completed={"event_0"})
+        state.event_completion_times = {"event_0": 1.0}
+        gen = self._generator(state)
+        gen.session_completion_queue = _queue_of(
+            {"session_id": "session_1", "completion_time": 5.0, "failed": True, "event_completion_times": {"event_0": 1.0}}
+        )
+
+        assert gen.check_session_completed("session_1") is True
+        assert state.failed is True
+        assert gen.session_end_perf_counter("session_1") == 5.0
+
+    def test_a_partial_flush_does_not_set_the_session_end(self) -> None:
+        """A flush comes from a session still open, so its timestamp is not when it ended."""
+        state = self._state(completed={"event_0"})
+        state.event_completion_times = {"event_0": 1.0}
+        gen = self._generator(state)
+        gen.session_completion_queue = _queue_of(
+            {"session_id": "session_1", "completion_time": 9.0, "partial": True, "event_completion_times": {"event_0": 1.0}}
+        )
+
+        assert gen.check_session_completed("session_1") is False
+        assert gen.session_end_perf_counter("session_1") == 1.0
+
+    def test_a_cut_short_session_reports_the_events_it_lost(self) -> None:
+        """2 of 4 events done when the stage stopped means 2 completed and 2 cancelled.
+
+        Reporting 0 cancelled hides the loss: a reader sees num_events=4, completed=2 and
+        cancelled=0, which adds up to nothing that happened.
+        """
+        gen = self._generator(self._state(completed={"event_0", "event_1"}))
+
+        metric = gen.build_session_metric(session_id="session_1", stage_id=0, start_time=0.0, end_time=5.0)
+
+        assert metric.num_events == 4
+        assert metric.num_events_completed == 2
+        assert metric.num_events_cancelled == 2
+        assert metric.num_events_completed + metric.num_events_cancelled == metric.num_events
+
+    def test_a_session_that_finished_reports_nothing_cancelled(self) -> None:
+        """Guard: the normal path must not start claiming cancellations."""
+        gen = self._generator(self._state(completed={f"event_{i}" for i in range(4)}, complete=True))
+
+        metric = gen.build_session_metric(session_id="session_1", stage_id=0, start_time=0.0, end_time=5.0)
+
+        assert metric.num_events_completed == 4
+        assert metric.num_events_cancelled == 0
+
+    def test_a_failed_session_keeps_the_count_the_worker_sent(self) -> None:
+        """Guard: a failure already reports its own cancellation count; don't recompute it."""
+        state = self._state(completed={"event_0"}, complete=True, failed=True)
+        state.cancelled_events = 3
+        gen = self._generator(state)
+
+        metric = gen.build_session_metric(session_id="session_1", stage_id=0, start_time=0.0, end_time=5.0)
+
+        assert metric.num_events_cancelled == 3
+
+    def test_partial_progress_is_recorded_without_marking_the_session_done(self) -> None:
+        """A flush from a winding-down worker fills in progress but must not claim completion.
+
+        If it set is_complete, the load generator would stop calling the session truncated
+        and it would re-enter the success counts - the opposite of what was asked for.
+        """
+        gen = object.__new__(OTelTraceReplayDataGenerator)
+        gen.session_graph_state = {"session_1": self._state(completed=set())}
+        items = [{"session_id": "session_1", "partial": True, "event_completion_times": {"event_0": 10.0, "event_1": 11.0}}]
+
+        queue = MagicMock()
+        queue.get_nowait = lambda: items.pop(0) if items else (_ for _ in ()).throw(Exception("empty"))
+        gen.session_completion_queue = queue
+
+        gen._process_completion_queue()
+
+        state = gen.session_graph_state["session_1"]
+        assert state.completed_events == {"event_0", "event_1"}
+        assert state.is_complete is False, "a partial flush must not mark the session complete"
+        assert state.failed is False
+
+    def test_a_winding_down_worker_flushes_what_its_open_sessions_got_through(self) -> None:
+        """The worker holds the only record of partial progress; it must hand it over.
+
+        Without this the parent has nothing to report for a truncated session, because the
+        worker's single per-session notification is only sent once the session finishes.
+        """
+        gen = object.__new__(OTelTraceReplayDataGenerator)
+        gen.worker_tracker = WorkerSessionTracker()
+        gen.worker_tracker.record_event_completed("session_1", "event_0", 10.0)
+        gen.worker_tracker.record_event_completed("session_1", "event_1", 11.0)
+        gen.worker_tracker.record_event_completed("session_2", "event_0", 12.0)
+        gen.worker_tracker.mark_session_failed("session_2")
+        pushed: list[dict[str, Any]] = []
+        queue = MagicMock()
+        queue.put_nowait = pushed.append
+        gen.session_completion_queue = queue
+
+        gen.flush_incomplete_sessions()
+
+        assert len(pushed) == 1, "the failed session already reported itself"
+        assert pushed[0]["session_id"] == "session_1"
+        assert pushed[0]["partial"] is True
+        assert pushed[0]["event_completion_times"] == {"event_0": 10.0, "event_1": 11.0}

@@ -12,6 +12,8 @@
    - [Reporting](#reporting)
    - [Storage](#storage)
    - [Tokenizer](#tokenizer)
+   - [Credentials](#credentials)
+   - [Observability](#observability)
 3. [Full Configuration Examples](#full-configuration-examples)
 4. [Advanced Use Cases](#advanced-use-cases)
    - [OpenTelemetry Trace Replay](#opentelemetry-trace-replay)
@@ -28,7 +30,7 @@ Controls the API interaction behavior. If SLO headers are present, each request 
 
 ```yaml
 api:
-  type: completion             # API type (completion|chat). completion is default since chat may require extra server config
+  type: completion             # API type (completion|chat|anthropic_messages|embeddings|rerank)
   streaming: true             # Enable streaming for TTFT, ITL, and TPOT metrics
   headers:                     # Optional custom HTTP headers
     x-inference-model: llama
@@ -40,14 +42,39 @@ api:
   slo_ttft_header: "x-slo-ttft-ms"        # Optional header name for TTFT SLO Header, default is x-slo-ttft-ms
 ```  
 
+With `type: embeddings`, requests go to `/v1/embeddings`. Embeddings responses have no generated tokens, so `streaming` and `response_format` are not supported and TTFT, TPOT, ITL and NTPOT are not reported. Request options go under `embeddings`:
+
+```yaml
+api:
+  type: embeddings
+  embeddings:                  # Optional; only valid with type: embeddings
+    batch_size: 16             # Input strings per request (default: 1)
+    dimensions: 512            # Optional embedding size; default is the model's
+    encoding_format: float     # Optional: float|base64; default is the server's
+```
+
+With `type: rerank`, requests go to `/v1/rerank` by default. A rerank request scores a query against a list of documents and generates no tokens, so `streaming` and `response_format` are not supported and TTFT, TPOT, ITL and NTPOT are not reported. There is no single rerank wire format across vendors, so the route and request field names are configurable under `rerank`:
+
+```yaml
+api:
+  type: rerank
+  rerank:                      # Optional; only valid with type: rerank
+    document_count: 20         # Documents scored per query (default: 10)
+    route: /v1/rerank          # Optional; vLLM also serves /rerank and /v2/rerank
+    query_field: query         # Optional request field name for the query
+    documents_field: documents # Optional request field name for the documents list
+    top_n: 5                   # Optional; ask the server to return only the top N results
+```
+
 ### Data Generation
 
 Configures the test data generation methodology:
 
 ```yaml
 data:
-  type: mock|shareGPT|synthetic|random|shared_prefix|cnn_dailymail|billsum_conversations|infinity_instruct|otel_trace_replay # Data generation type
+  type: mock|shareGPT|synthetic|random|shared_prefix|cnn_dailymail|billsum_conversations|infinity_instruct|otel_trace_replay|visionarena # Data generation type
   path: ./data/shareGPT/ShareGPT_V3_unfiltered_cleaned_split.json # For shareGPT type, path where dataset to be used is present. Path needs to be set for cnn_dailymail, billsum_conversations and infinity_instruct as well
+  load_timeout: 300.0                                  # Dataset loading deadline (seconds); null disables
   input_distribution:                                 # For synthetic/random types
     min: 10                                           # Minimum prompt length (tokens)
     max: 100                                          # Maximum prompt length
@@ -66,6 +93,7 @@ data:
     system_prompt_len: 100    # Shared prefix length (tokens)
     question_len: 50          # Default question length (tokens), used when question_distribution is absent
     output_len: 50            # Default output length (tokens), used when output_distribution is absent
+    max_model_len: 225000     # Optional multi-turn context ceiling; defaults to 225000, matching conversation_replay
     question_distribution:    # Optional: distribution for question lengths (overrides question_len)
       min: 10
       max: 1024
@@ -78,7 +106,100 @@ data:
       std_dev: 5
 ```
 
+ShareGPT downloads and caches the original
+`anon8231489123/ShareGPT_Vicuna_unfiltered/ShareGPT_V3_unfiltered_cleaned_split.json`
+file within `data.load_timeout`, then reads it incrementally from disk without
+changing its record order or startup priming. Local `.json` files (JSON arrays or
+JSON Lines) use the same incremental reader. Each pass reopens the file instead
+of retaining decoded records, so memory is bounded by the read buffer and
+individual records. Repeat passes and later runs reuse the Hugging Face cache;
+request generation does not depend on a network connection staying open between
+stages. Parsed turns remain JSON objects, allowing Chat and Anthropic Messages
+to consume the default dataset as well as Completion.
+
+`data.load_timeout` bounds Hub dataset initialization for ShareGPT, CNN/DailyMail,
+VisionArena, and OTel trace replay (300 seconds by default). For ShareGPT and
+CNN/DailyMail, this includes loading and reading the first row, when streaming
+downloads begin. For VisionArena, it includes building the entire startup row pool.
+For OTel, it bounds the non-streaming `load_dataset()` call. Later streaming
+iteration and local JSON streaming loaders have no deadline.
+
+The value must be positive and finite; YAML `null` disables the deadline. The
+`--data.load_timeout` CLI flag accepts a number, not `null`. Increase the timeout
+for large datasets or slow connections. A timed-out loader runs in a daemon thread
+and cannot be cancelled. As with tokenizer loading, the deadline applies to waits
+that release the GIL, such as network and file I/O.
+
 **Note:** For `otel_trace_replay` type, see the [OpenTelemetry Trace Replay](#opentelemetry-trace-replay) section for complete configuration details.
+
+#### Multimodal Data Generation
+
+For VLMs, the `synthetic` and `shared_prefix` data types accept an optional `multimodal` block that produces images, videos, and/or audio alongside the text prompt:
+
+```yaml
+data:
+  type: synthetic
+  input_distribution: { ... }
+  output_distribution: { ... }
+  multimodal:
+    image:
+      count: { type: uniform, min: 1, max: 2, mean: 1.5 }  # items per request
+      insertion_point: 0.0                                  # 0=prefix, 1=suffix, or a Distribution
+      resolutions:                                          # AnyResolution or list of weighted resolutions
+        - resolution: "1080p"
+          weight: 0.8
+        - resolution: "4k"
+          weight: 0.2
+    video:
+      count: { type: fixed, min: 1, max: 1, mean: 1 }
+      insertion_point: 1.0
+      profiles:                                             # (resolution, frames) tuples
+        - profile: { resolution: "720p", frames: 32 }
+          weight: 1.0
+    audio:
+      count: { type: fixed, min: 1, max: 1, mean: 1 }
+      insertion_point: 0.5
+      durations:
+        - duration: 5.0
+          weight: 1.0
+```
+
+An `insertion_point` distribution samples positions as fractions of the prompt.
+Its `min` and `max` must be within `[0, 1]`; for distributions other than
+`uniform`, `mean` must also be within those bounds. For example,
+`{ type: fixed, min: 0, max: 1, mean: 0.5 }` places media in the middle, just like
+`insertion_point: 0.5`. A `uniform` distribution with `min: 0, max: 1` samples
+throughout the prompt. Token and media count distributions continue to produce
+integers.
+
+The reportgen output adds `throughput.{images,videos,audios}_per_sec`, `request_size_bytes`, and per-modality distribution blocks (`image.{count,pixels,bytes,aspect_ratio}`, `video.{count,frames,pixels,bytes,aspect_ratio}`, `audio.{count,seconds,bytes}`) to `summary_lifecycle_metrics.json`.
+
+##### Wire formats
+
+- **Images** are PNG by default. Set `image.representation: jpeg` for
+  JPEG-encoded payloads (smaller, lossy) — useful when the target VLM
+  expects JPEG or when you want wire-size closer to real client traffic.
+- **Videos** carry one `video.representation` value:
+  - `mp4` (default): one `video_url` block carrying an MP4 blob.
+  - `png_frames`: emit `frames` × PNG `image_url` blocks at one insertion
+    point. No server-side MP4 decode dependency; useful for prefix-cache
+    benchmarks.
+  - `jpeg_frames`: same as `png_frames` but with JPEG-encoded frames —
+    smaller wire payload, matches client pipelines that pre-extract and
+    JPEG-compress frames before sending to the model server.
+- **Audio** is 16-bit mono WAV at 16 kHz (not configurable today).
+
+##### Picking values
+
+Multimodal config is passed to the model server **as-is** with no model-aware validation, so the right starting point is the model's spec sheet.
+
+- **Per-request media count** — align with vLLM's `--limit-mm-per-prompt` (e.g. `image=4,video=2,audio=2`). Sending more items than the server allows fails at the wire and shows up in the lifecycle report's `failures` count.
+- **Image resolutions** — stay within the vision encoder's pixel cap (Qwen2-VL `min_pixels`/`max_pixels`, LLaVA fixed 336/672, Pixtral tile caps, etc.). Above-cap images get downsized server-side, which means reported `pixels`/`bytes` reflect what was *sent*, not what the model processed.
+- **Video frames** — most VLMs sample to a fixed `num_frames` budget (often 8/16/32). Sending more frames than the server samples wastes wire bytes without changing the workload the model sees. If the server doesn't accept `video_url` at all, switch to `representation: frames`.
+- **Audio durations** — most audio-capable models cap clips around 30 s (Qwen2-Audio, Whisper-style chunking). Longer clips fail or get truncated.
+- **Effective context length** — images and audio consume context tokens. Large media plus a long text prompt can exceed `--max-model-len` and fail.
+
+When in doubt: start small, watch the `failures` count in the report, and ramp up resolutions/counts/durations once the success path is solid. There is no portable API across vLLM / SGLang / TGI to query these limits at runtime; a per-model capability registry that validates the multimodal config at load time is tracked as future work.
 
 ### Load Configuration
 
@@ -93,9 +214,12 @@ load:
       duration: 30                  # Seconds to maintain this rate (CONSTANT or POISSON LOADS)
       concurrency_level: 3          # Level of concurrency/number of worker threads (CONCURRENT LOADS)
       num_requests: 40              # Number of requests to be processed by concurrency_level worker threads (CONCURRENT LOADS)
-  num_workers: 4                    # Concurrent worker threads (default: CPU_cores)
+  num_workers: 4                    # Concurrent worker threads (default: cgroup-aware CPU count: min(CPU affinity, cgroup CPU quota when present, host CPUs))
   worker_max_concurrency: 10        # Max concurrent requests per worker
   worker_max_tcp_connections: 2500  # Max TCP connections per worker
+  request_timeout: 900              # Optional: per-request timeout in seconds (applies per attempt)
+  request_retries: 0                # Optional: extra attempts for faults before response headers (default: 0, no retry)
+  request_retry_backoff_sec: 0.5    # Optional: base backoff before the first retry, doubled + jittered per attempt
   base_seed: 12345                  # Optional: base random seed for reproducibility (default: current time in ms)
   lora_traffic_split:               # Optional: MultiLoRA traffic splitting
     - name: adapter_1               # LoRA adapter name
@@ -105,6 +229,43 @@ load:
 ```
 
 **Note:** `trace_session_replay` load type has different stage parameters. See [OpenTelemetry Trace Replay](#opentelemetry-trace-replay) for configuration details.
+
+#### Retrying Transport Faults
+
+`request_retries` re-sends a request that fails **before response headers were obtained** —
+a refused connection, a reset, or a connection dropped from the pool. It defaults to `0`,
+preserving the historical behavior of failing on the first fault.
+
+What is retried:
+
+| Fault | Retried | Why |
+|---|---|---|
+| Connection refused, reset, dropped from pool | Yes | Nothing was measured on the client side; these recover |
+| Anything after a response was established | No | Re-sending could mix or discard token-level measurements and duplicate server work |
+| Timeout | No | A real measurement of a slow server, and `request_timeout` applies per attempt |
+| Rejected certificate, fingerprint mismatch | No | Configuration errors — every attempt fails identically |
+
+"No response headers" is not "the server did no work": the request bytes may already have
+been sent. A retry is therefore bounded and backed off rather than unconditional.
+
+**Timing.** `start_time` stays at the logical request's dispatch and is never re-stamped per
+attempt, so end-to-end latency counts the failed attempt and its backoff — the workload
+really did wait — and `schedule_delay`, `send_duration` and `achieved_rate` stay correct.
+The cost is reported beside those numbers instead: a retried request carries
+`info.retry_wasted_sec` plus a matching OTel span attribute, and the `retries` block totals
+it across the run. A request that never succeeded counts its whole life as waste, since no
+attempt answered.
+
+Retry fields are omitted rather than zeroed on anything that never retried, so a run with
+`request_retries: 0` — or with the knob on but no faults — produces the report JSON it
+produced before retries existed.
+
+**Costs.** `request_timeout` applies per attempt, so worst-case wall time per request
+becomes `(1 + request_retries) × request_timeout` plus backoff; keep `request_retries` small
+when `request_timeout` is large. Backoff starts at `request_retry_backoff_sec`, then doubles
+and jitters so retries do not resynchronize into a burst.
+
+See [Reports](otel_trace_replay.md#reports) for the `retries` block and the CLI columns.
 
 #### Load Sweeps
 
@@ -129,11 +290,48 @@ Configures connection to the model serving backend:
 
 ```yaml
 server:
-  type: vllm                                          # Currently only vLLM supported
-  model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"   # Required model identifier
+  type: vllm                                          # Server type (vllm|sglang|tgi|mock); vLLM, SGLang and TGI verified
+  model_name: "HuggingFaceTB/SmolLM2-135M-Instruct"   # Optional; auto-detected from /v1/models if unset
   base_url: "http://0.0.0.0:8000"                     # Required server endpoint
   ignore_eos: true                                    # Whether to ignore End-of-Sequence tokens
   api_key: ""                                         # Optional API key for authenticated endpoints
+  cert_path: ""                                       # Optional path to a client TLS certificate (mutual TLS)
+  key_path: ""                                        # Optional path to the private key for cert_path
+```
+
+`server.type` selects the model server (vLLM by default). Verified servers are vLLM,
+SGLang, and TGI; the `mock` type runs against a built-in client that needs no network.
+
+`server.model_name` is optional. When it is unset, the client queries
+`GET {base_url}/v1/models` and uses the first entry's `id` as the model name, so
+servers that serve exactly one model need no model identifier at all. The lookup:
+
+- Reuses the connection settings of the benchmark: `api_key`, and `cert_path`/`key_path`
+  when the endpoint requires mutual TLS.
+- Uses `load.request_timeout` when set, falling back to a bounded 30-second probe so an
+  unresponsive server fails startup instead of hanging it.
+- When the tokenizer path is also unset, the tokenizer is loaded under the resolved
+  model name, falling back to the entry's `root` (the real model path that vLLM reports
+  when `--served-model-name` is a route alias). This fallback also applies when
+  `server.model_name` is set explicitly: if that name cannot load a tokenizer, the
+  client probes `/v1/models` and the entry whose `id` matches the configured name
+  supplies `root`. A name that loads its own tokenizer triggers no probe, so pinning a
+  real model path costs nothing. If neither loads, the error names
+  `tokenizer.pretrained_model_name_or_path` so the setting can be pinned explicitly.
+- The `root` fallback relies on vLLM reporting the model path there. SGLang reports the
+  served name instead, so behind `--served-model-name` there is no path to fall back to
+  and the tokenizer cannot be auto-detected: pin
+  `tokenizer.pretrained_model_name_or_path` when serving an SGLang alias.
+
+The same `/v1/models` lookup validates LoRA adapter names when
+`load.lora_traffic_split` is configured.
+
+Example — let both the model name and the tokenizer be auto-detected:
+
+```yaml
+server:
+  type: vllm
+  base_url: "http://0.0.0.0:8000"
 ```
 
 ### Metrics Collection
@@ -147,6 +345,9 @@ metrics:
     url: "http://localhost:9090"  # Prometheus server URL
     scrape_interval: 15           # Metrics scrape interval (seconds)
     google_managed: false         # Whether using Google Managed Prometheus (see 'Google Managed Prometheus (GMP) Requirements' section)
+    bearer_token: ""              # Optional bearer token for authenticated Prometheus servers
+    verify_ssl: true              # Verify the server's TLS certificate (disable for self-signed certificates)
+    headers: {}                   # Optional extra HTTP headers sent with every query
     filters: []                   # List of metric names to collect
 ```
 
@@ -183,13 +384,59 @@ report:
     summary: true             # Generate high-level summary
     per_stage: true           # Include breakdown by load stage
     per_request: false        # Enable detailed per-request logs (verbose)
+    per_request_fields:       # Control fields included in per_request_lifecycle_metrics.json
+      request: true           # Include raw request payloads
+      response: true          # Include raw response payloads
+      info: true              # Include structured request/response metadata
+      response_chunks: true   # Include raw streaming chunks inside info.response_metrics
+      computed_metrics: false # Include computed per-request latency metrics (TTFT/TPOT/ITL/...)
     per_adapter: false        # Generate metrics grouped by LoRA adapter
     per_adapter_stage: false  # Generate metrics grouped by adapter and stage
     percentiles: [0.1, 1, 5, 10, 25, 50, 75, 90, 95, 99, 99.9] # List of percentiles to calculate
+    use_server_output_tokens: false # Treat the server's usage.completion_tokens as the source of truth for output tokens.
+    max_error_messages: 100   # Max number of unique error messages retained per error label (failures.by_label) and per bad tool call substitution entry
+    use_server_output_tokens: false # Treat the server's usage.completion_tokens as the source of truth for output tokens.
   prometheus:
     summary: true             # Include Prometheus metrics summary
     per_stage: false          # Disable Prometheus stage breakdown
 ```
+
+For metrics-only per-request reports, disable the raw fields and enable
+`computed_metrics` instead — this removes the multi-GB raw payloads while
+keeping full per-request latency analysis:
+
+```yaml
+report:
+  request_lifecycle:
+    per_request: true
+    per_request_fields:
+      request: false
+      response: false
+      info: false
+      response_chunks: false
+      computed_metrics: true
+```
+
+Setting `info: false` removes the entire `info` block, including
+`response_chunks`; in that case `response_chunks` has no effect.
+
+Each entry includes `scheduled_time`, the request's scheduled timestamp, alongside
+`start_time` and `end_time`. It also includes `stage_id` when set, so requests can
+be grouped by load stage. These fields are included regardless of `per_request_fields`.
+
+In `trace_session_replay` runs, each entry also carries a top-level
+`session_id` naming the session the request belongs to, regardless of
+`per_request_fields`. Other workloads do not set it.
+
+`computed_metrics` (off by default) adds a `computed_metrics` block to each
+successful entry with `request_latency`, `normalized_time_per_output_token`,
+`time_to_first_token`, `time_per_output_token`, `inter_token_latency` (mean),
+`inter_token_latencies` (per-token deltas), `input_tokens`, `output_tokens`,
+and the request's `ttft_slo_sec`/`tpot_slo_sec` SLOs — the same values (and
+the same tokenizer-based correction from raw streaming chunks) used to compute
+the `summary_lifecycle_metrics.json` / `stage_*_lifecycle_metrics.json`
+aggregates. Non-streamed or non-streamable requests report `null` for
+`time_to_first_token`, `time_per_output_token`, and `inter_token_latency`.
 
 ### Storage
 
@@ -219,10 +466,59 @@ Optional tokenizer configuration for specialized tokenization:
 
 ```yaml
 tokenizer:
-  pretrained_model_name_or_path: "model-id"   # Required model path
+  pretrained_model_name_or_path: "model-id"   # Optional; defaults to server.model_name, then that model's root
   trust_remote_code: true                     # Whether to trust custom tokenizer code
   token: ""                                   # HuggingFace access token for private models
+  load_timeout: 300.0                         # Deadline in seconds for loading the tokenizer,
+                                              # including any download from Hugging Face Hub.
+                                              # Set to null to disable. Default: 300.
 ```
+
+`tokenizer.pretrained_model_name_or_path` is optional. When it is unset, the tokenizer
+is loaded under the resolved `server.model_name` -- configured or detected; if that name
+is a server-side route alias the tokenizer has no files for, the client probes
+`/v1/models` and falls back to the `root` of the matching entry (the real model path). When neither loads,
+the error names this setting so it can be pinned explicitly. The path that resolved is
+written back into the run config, so the report bundle's `config.yaml` shows it and
+report generation counts tokens with the same tokenizer the run measured with -- note
+that a resolved `root` is a path on the model server, so the bundled config describes
+that server's environment rather than a portable one.
+
+`load_timeout: null` can only be set in a YAML config file; the `--tokenizer.load_timeout` CLI flag parses a float and rejects `null`. The deadline applies to each tokenizer construction independently; a run constructs a tokenizer in several stages (data generation, the model server client, report generation), so the worst-case total wait is a small multiple of `load_timeout`.
+
+### Credentials
+
+A config can carry a credential in five places: `server.api_key`, `tokenizer.token`, an authentication header under `api.headers`, `metrics.prometheus.bearer_token`, and an authentication header under `metrics.prometheus.headers`.
+
+A run renders its config twice, to the log at startup and to `config.yaml` in the report bundle. Both copies replace these values with `[REDACTED]`, so pod logs and reports uploaded to GCS or S3 do not carry keys. The requests themselves still use the real values.
+
+A header is masked when its name contains `auth`, `key`, `token`, `secret` or `cookie`, ignoring case. That covers `Authorization`, `x-api-key`, Kong's `apikey`, `X-Auth-Token` and Azure API Management's `Ocp-Apim-Subscription-Key`. Every other header is left as it is, so a rendered config still shows the routing setup the run used.
+
+An empty value, such as `api_key: ""`, is not a credential and is left as it is.
+
+Config validation errors name the setting that failed but do not quote its value, since the value can be a credential.
+
+Because the saved `config.yaml` is redacted, re-running from it needs the credentials supplied again. Loading a config whose credentials still hold `[REDACTED]`, or the `**********` pydantic writes for a secret, fails with an error naming each setting. Supply the value in the file or with its flag, or remove the setting:
+
+```bash
+inference-perf --config_file reports-20260914-101500/config.yaml --server.api_key "$API_KEY"
+```
+
+### Observability
+
+Runtime metrics inference-perf exports about the benchmark run itself (stage state, request counts, in-flight requests, latency histograms), as opposed to the server-side metrics it collects under [Metrics Collection](#metrics-collection). The metric set is documented in [runtime_metrics.md](./runtime_metrics.md).
+
+```yaml
+observability:
+  metrics:
+    port: 9464   # Port of the endpoint. 0 picks an ephemeral port, logged at startup
+```
+
+Metrics are always collected in-process, where they drive the progress bars. The HTTP `/metrics` endpoint starts only when `observability.metrics` is set, so a run that never asked for it opens no port. `metrics: {}` serves on the default port. A bare `metrics:` with nothing under it is YAML null and leaves the endpoint off. Passing `--observability.metrics.port` on the command line also turns it on.
+
+The endpoint binds every interface, so a scraper reaches it by pod IP in Kubernetes or through `docker run -p`. The Helm chart values and the `deploy/` Job turn it on. The root `config.yml` does not, so the README quickstart exposes nothing. If the port cannot be bound, the run continues without the endpoint and logs an error. The reports are unaffected.
+
+Transient signals (current stage, in-flight requests) only exist while the run is active, so they need a scraper attached during the run. The last scrape can land up to one scrape interval before the run ends, and a run shorter than the interval may not be scraped at all. The final numbers are in the reports.
 
 ## Full Configuration Examples
 
@@ -263,6 +559,10 @@ tokenizer:
   pretrained_model_name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
 data:
   type: random
+  use_chat_template: false  # wrap each prompt in the tokenizer's chat template (single user turn) before sending.
+                            # Input lengths then target the fully templated prompt, so the server-side prefill
+                            # token count still matches the configured length. Requires a tokenizer with a chat
+                            # template, and every input length must exceed the template's fixed token overhead.
   input_distribution:
     min: 10             # min length of the synthetic prompts
     max: 100            # max length of the synthetic prompts
@@ -379,13 +679,20 @@ data:
     include_errors: false                         # Skip spans with error status, that is, status != 0 (default)
     skip_invalid_files: true                      # Skip unparseable trace files during replay
 
+    # Tool-call mitigation (client-side, default disabled)
+    bad_tool_call_handling: none                  # none|use_recorded — see docs/otel_trace_replay.md#bad-tool-call-handling
+
+    # Output replay fidelity (default disabled)
+    disable_output_substitution: false            # true = send recorded assistant outputs as-is (no live substitution); conflicts with inject_random_session_id / duplicate_sessions_target
+
 load:
   type: trace_session_replay                      # Required for otel_trace_replay
   stages:
     - concurrent_sessions: 4                      # Max sessions active simultaneously
-      num_sessions: 20                            # Run 20 sessions in this stage
+      num_sessions: 20                            # Run 20 sessions in this stage (omit when using duration)
       session_rate: 2.0                           # Optional: start max 2 sessions/sec
-      timeout: 300                                # Optional: stage timeout in seconds
+      duration: 1800                              # Optional: planned stop after 30 min; stage reports COMPLETED
+      max_stage_duration: 2100                    # Optional: safety limit; reports FAILED. Must exceed duration
   num_workers: 4                                  # Worker processes
   worker_max_concurrency: 10                      # Max concurrent requests per worker
 ```
@@ -404,8 +711,16 @@ load:
 - Omit for no rate limiting
 - Useful for controlled ramp-up scenarios
 
-**`timeout`** (optional): Wall-clock safety limit
+**`duration`** (optional): Planned stage length in seconds — bound the stage by time rather than by session count
+- At the deadline the stage stops dispatching and exits as COMPLETED
+- Sessions still running are recorded as truncated: counted under `num_sessions_not_completed_active`, and left out of the session success/failure counts and duration percentiles. The requests they completed still count
+- Each truncated session still reports its own split — `num_events_completed` plus `num_events_cancelled` adds up to `num_events`, with `success: null` — so being excluded from the aggregates does not mean being unaccounted for
+- Whether the window is filled depends on the data generator. `otel_trace_replay` and `synthetic_agentic` replay their corpus once it is used up, each replay under its own session ID, so the corpus need not be sized by hand — and `duplicate_sessions_target` is rejected with `duration` for these two, since both would mint the same `_dupN` IDs. `weka_trace_replay` builds every session up front and so ends when its corpus does; raise its `duplicate_sessions_target` to cover the window. Either way a stage that falls short logs a warning saying by how much
+- Wall-clock time is `duration` plus teardown, since in-flight requests are given a chance to finish
+
+**`max_stage_duration`** (optional): Wall-clock safety limit
 - If exceeded, in-flight sessions are cancelled and stage exits as FAILED
+- Distinct from `duration`: this is the fault signal, `duration` is the planned stop. Must be longer than `duration` when both are set
 
 #### Trace File Format
 

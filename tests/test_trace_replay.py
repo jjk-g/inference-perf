@@ -16,8 +16,15 @@ from pathlib import Path
 from unittest.mock import Mock
 from inference_perf.apis import LazyLoadInferenceAPIData
 from inference_perf.apis.completion import CompletionAPIData
-from inference_perf.datagen.random_datagen import RandomDataGenerator
+from inference_perf.datagen.synthetic.random_datagen import RandomDataGenerator
 from inference_perf.datagen.base import LazyLoadDataMixin
+from inference_perf.datagen.replay.replay_graph_session_datagen import (
+    ReplayGraphSessionGeneratorBase,
+    ReplaySession,
+    ReplaySessionState,
+    SessionFailureCause,
+)
+from inference_perf.datagen.replay.replay_graph_types import ReplayGraph
 from inference_perf.config import APIConfig, DataConfig, APIType, TraceFormat, TraceConfig, DataGenType
 
 
@@ -54,7 +61,7 @@ class TestTraceReplay:
             mock_tokenizer_obj.vocab_size = 1000
             mock_tokenizer_obj.all_special_ids = []
             mock_tokenizer.get_tokenizer.return_value = mock_tokenizer_obj
-            mock_tokenizer.count_tokens.side_effect = lambda text: len(text.split())
+            mock_tokenizer.count_tokens.side_effect = lambda text, **kw: len(text.split())
 
             api_config = APIConfig(type=APIType.Completion)
             trace_config = TraceConfig(file=str(temp_path), format=TraceFormat.AZURE_PUBLIC_DATASET)
@@ -85,3 +92,138 @@ class TestTraceReplay:
 
         finally:
             temp_path.unlink()
+
+
+class TestBuildSessionMetricFailureReason:
+    """Tests that failure_reason is surfaced as an error in SessionLifecycleMetric."""
+
+    def _make_generator(self) -> ReplayGraphSessionGeneratorBase:
+        api_config = APIConfig(type=APIType.Chat)
+        data_config = DataConfig(type=DataGenType.Random)
+        return ReplayGraphSessionGeneratorBase(
+            api_config=api_config,
+            config=data_config,
+            tokenizer=None,
+        )
+
+    def _make_graph(self) -> ReplayGraph:
+        return ReplayGraph(
+            events={"evt_1": Mock()},
+            root_event_ids=["evt_1"],
+            source_file="test_trace.json",
+        )
+
+    def test_failure_reason_produces_error(self) -> None:
+        gen = self._make_generator()
+        graph = self._make_graph()
+
+        gen.sessions = [ReplaySession(session_id="s1", source_id="src", session_index=0, graph=graph)]
+        gen.session_graph_state["s1"] = ReplaySessionState(
+            session_id="s1",
+            graph=graph,
+            ready_events=set(),
+            dispatched_events=set(),
+            completed_events=set(),
+            event_completion_times={},
+            failed=True,
+            failure_reason="predecessor wait failed: TimeoutError",
+            failure_cause=SessionFailureCause.PREDECESSOR_WAIT_FAILED.value,
+            cancelled_events=1,
+        )
+
+        metric = gen.build_session_metric(session_id="s1", stage_id=0, start_time=100.0, end_time=110.0)
+
+        assert metric.error is not None
+        # The stable cause code, not the old catch-all "SessionReplayError".
+        assert metric.error.error_type == "predecessor_wait_failed"
+        assert metric.error.error_msg == "predecessor wait failed: TimeoutError"
+        assert metric.num_events_cancelled == 1
+
+    def test_failed_without_reason_still_produces_error(self) -> None:
+        """A session marked failed with no recorded reason must not read as success.
+
+        The report derives success from `error is None`, so dropping the error here
+        would count this session as SUCCEEDED once all its events completed.
+        """
+        gen = self._make_generator()
+        graph = self._make_graph()
+
+        gen.sessions = [ReplaySession(session_id="s1", source_id="src", session_index=0, graph=graph)]
+        gen.session_graph_state["s1"] = ReplaySessionState(
+            session_id="s1",
+            graph=graph,
+            ready_events=set(),
+            dispatched_events=set(),
+            completed_events={"evt_1"},
+            event_completion_times={"evt_1": 105.0},
+            failed=True,
+            failure_reason=None,
+        )
+
+        metric = gen.build_session_metric(session_id="s1", stage_id=0, start_time=100.0, end_time=110.0)
+
+        assert metric.error is not None
+        assert metric.error.error_type == SessionFailureCause.UNKNOWN.value
+        assert metric.num_events_completed == metric.num_events
+
+    def test_no_failure_reason_no_error(self) -> None:
+        gen = self._make_generator()
+        graph = self._make_graph()
+
+        gen.sessions = [ReplaySession(session_id="s1", source_id="src", session_index=0, graph=graph)]
+        gen.session_graph_state["s1"] = ReplaySessionState(
+            session_id="s1",
+            graph=graph,
+            ready_events=set(),
+            dispatched_events=set(),
+            completed_events={"evt_1"},
+            event_completion_times={"evt_1": 105.0},
+            failed=False,
+            failure_reason=None,
+        )
+
+        metric = gen.build_session_metric(session_id="s1", stage_id=0, start_time=100.0, end_time=110.0)
+
+        assert metric.error is None
+        assert metric.num_events_completed == 1
+        assert metric.num_events_cancelled == 0
+
+
+class TestAzureTimestampPrecision:
+    def test_submillisecond_replay_timing(self, tmp_path: Path) -> None:
+        import pytest
+        from inference_perf.utils.trace_reader import AzurePublicDatasetReader
+        from inference_perf.loadgen.load_timer import TraceReplayLoadTimer
+
+        trace = tmp_path / "trace.csv"
+        trace.write_text(
+            "TIMESTAMP,ContextTokens,GeneratedTokens\n"
+            "2023-01-01 00:00:00.001,150,200\n"
+            "2023-01-01 00:00:00.002,300,150\n"
+            "2023-01-01 00:00:00.009,250,100\n"
+            "2023-01-01 00:00:00.011,200,300\n"
+            "2023-01-01 00:00:00.011123,200,300\n"
+            "2023-01-01 00:00:01.001,200,300\n"
+        )
+        timer = TraceReplayLoadTimer(AzurePublicDatasetReader(), trace)
+        actual = list(timer.start_timer(initial=0.0))
+        # Epoch-sized float64 timestamps have sub-microsecond rounding error.
+        assert actual == pytest.approx([0, 0.001, 0.008, 0.010, 0.010123, 1], abs=5e-7)
+
+    def test_timestamp_format_compatibility(self) -> None:
+        from datetime import datetime, timezone
+        from inference_perf.utils.trace_reader import AzurePublicDatasetReader
+
+        reader = AzurePublicDatasetReader()
+        base = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        for timestamp, microseconds in [
+            ("2023-01-01 00:00:00", 0),
+            (' "2023-01-01T00:00:00.1Z" ', 100000),
+            ("2023-01-01 00:00:00.12", 120000),
+            ("2023-01-01T00:00:00.123Z", 123000),
+            ("2023-01-01T00:00:00.123+05:30", 123000),
+            ("2023-01-01T00:00:00.123-05:30", 123000),
+            ("2023-01-01 00:00:00.123456", 123456),
+            ("2023-01-01 00:00:00.123456789", 123456),
+        ]:
+            assert reader.parse_timestamp(timestamp) == base.replace(microsecond=microseconds).timestamp()

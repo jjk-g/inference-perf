@@ -18,11 +18,15 @@ from .base import (
     ErrorResponseInfo,
     LazyLoadInferenceAPIData,
     SessionLifecycleMetric,
-    UnaryInferenceResponseInfo,
-    StreamedInferenceResponseInfo,
+    ResponseMetrics,
+    UnaryResponseMetrics,
+    StreamedResponseMetrics,
 )
 from .chat import ChatCompletionAPIData, ChatMessage
 from .completion import CompletionAPIData
+from .anthropic_messages import AnthropicMessagesAPIData
+from .embeddings import EmbeddingsAPIData
+from .rerank import RerankAPIData
 
 __all__ = [
     "InferenceAPIData",
@@ -34,6 +38,10 @@ __all__ = [
     "ChatCompletionAPIData",
     "ChatMessage",
     "CompletionAPIData",
-    "UnaryInferenceResponseInfo",
-    "StreamedInferenceResponseInfo",
+    "ResponseMetrics",
+    "AnthropicMessagesAPIData",
+    "EmbeddingsAPIData",
+    "RerankAPIData",
+    "UnaryResponseMetrics",
+    "StreamedResponseMetrics",
 ]

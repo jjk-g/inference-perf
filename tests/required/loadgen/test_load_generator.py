@@ -1,0 +1,472 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import unittest
+from itertools import count, repeat
+from unittest.mock import MagicMock, AsyncMock, patch
+import multiprocessing as mp
+import asyncio
+import typing
+import signal
+import sys
+import numpy as np
+from typing import Any, Iterator
+
+from inference_perf.loadgen.load_generator import LoadGenerator, RequestQueueData
+from inference_perf.config import LoadConfig, LoadType, TraceConfig, TraceFormat, StandardLoadStage
+from inference_perf.client.modelserver import ModelServerClient
+from inference_perf.apis import InferenceAPIData
+from inference_perf.apis.base import ErrorResponseInfo, InferenceInfo, RequestLifecycleMetric
+from inference_perf.circuit_breaker.simple_breaker import SimpleCircuitBreaker
+from inference_perf.config.circuit_breaker import CircuitBreakerConfig, MetricsSpec, TriggerConsecutive
+from inference_perf.payloads import RequestMetrics, Text
+from inference_perf.utils.request_queue import Drained, RequestQueue
+
+# Patch asyncio.TaskGroup for Python < 3.11
+if sys.version_info < (3, 11):
+
+    class MockTaskGroup:
+        async def __aenter__(self) -> "MockTaskGroup":
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+            pass
+
+        def create_task(self, coro: Any) -> Any:
+            return asyncio.create_task(coro)
+
+    asyncio.TaskGroup = MockTaskGroup
+
+# Patch typing.TypeAlias for Python < 3.10
+if sys.version_info < (3, 10):
+    typing.TypeAlias = typing.Any
+
+from inference_perf.datagen import DataGenerator
+
+
+class MockWorker:
+    def __init__(self, id: int, shared_max_concurrency: Any) -> None:
+        self.id = id
+        self.shared_max_concurrency = shared_max_concurrency
+
+
+class TestLoadGeneratorConcurrency(unittest.TestCase):
+    def setUp(self) -> None:
+        self.mock_datagen = MagicMock(spec=DataGenerator)
+        # No pinned routing unless a test says so: a bare MagicMock is truthy
+        # and would read as "every request is pinned".
+        self.mock_datagen.is_preferred_worker_requested.return_value = False
+        self.mock_datagen.preferred_worker_count.return_value = None
+        self.load_config = LoadConfig(type=LoadType.CONCURRENT, num_workers=4, worker_max_concurrency=100)
+        # Mocking get_circuit_breaker since LoadGenerator init calls it
+        with unittest.mock.patch("inference_perf.loadgen.load_generator.get_circuit_breaker"):
+            self.load_generator = LoadGenerator(self.mock_datagen, self.load_config)
+
+    def _add_workers(self, n: int) -> None:
+        self.load_generator.workers = []
+        for i in range(n):
+            self.load_generator.workers.append(MockWorker(i, mp.Value("i", 0)))  # type: ignore
+
+    def _worker_concurrencies(self) -> list[int]:
+        return [worker.shared_max_concurrency.value for worker in self.load_generator.workers]  # type: ignore
+
+    # 4 workers, concurrency_level 8, and the datagen pins every request to
+    # one worker. Pins the split [8, 0, 0, 0]: workers the pins never reach
+    # get no share of the budget, so worker 0 delivers the whole level.
+    def test_set_worker_concurrency_follows_pinned_worker_count(self) -> None:
+        self._add_workers(4)
+        self.mock_datagen.is_preferred_worker_requested.return_value = True
+        self.mock_datagen.preferred_worker_count.return_value = 1
+        self.load_generator._set_worker_concurrency(8)
+        self.assertEqual(self._worker_concurrencies(), [8, 0, 0, 0])
+
+    # 4 workers, concurrency_level 8, pins reach 3 workers. Pins [3, 3, 2, 0]:
+    # the usual remainder split, but over the 3 reachable workers.
+    def test_set_worker_concurrency_splits_remainder_over_pinned_workers(self) -> None:
+        self._add_workers(4)
+        self.mock_datagen.is_preferred_worker_requested.return_value = True
+        self.mock_datagen.preferred_worker_count.return_value = 3
+        self.load_generator._set_worker_concurrency(8)
+        self.assertEqual(self._worker_concurrencies(), [3, 3, 2, 0])
+
+    # 4 workers. Pins the worker count routing and the split both use:
+    # 4 with nothing limiting it, 3 under concurrency_level 3, 2 when pins
+    # reach 2 workers, and 4 again when the datagen pins but cannot say to how
+    # many workers (count None).
+    def test_active_worker_count_matches_the_split(self) -> None:
+        self.assertEqual(self.load_generator._active_worker_count(None), 4)
+        self.assertEqual(self.load_generator._active_worker_count(3), 3)
+        self.mock_datagen.is_preferred_worker_requested.return_value = True
+        self.mock_datagen.preferred_worker_count.return_value = 2
+        self.assertEqual(self.load_generator._active_worker_count(None), 2)
+        self.assertEqual(self.load_generator._active_worker_count(8), 2)
+        self.mock_datagen.preferred_worker_count.return_value = None
+        self.assertEqual(self.load_generator._active_worker_count(8), 4)
+
+    def test_set_worker_concurrency_divisible(self) -> None:
+        # Setup workers
+        self.load_generator.workers = []
+        for i in range(4):
+            shared_val = mp.Value("i", 0)
+            self.load_generator.workers.append(MockWorker(i, shared_val))  # type: ignore
+
+        # Test concurrency_level = 8 (8 / 4 = 2 per worker)
+        self.load_generator._set_worker_concurrency(8)
+
+        for worker in self.load_generator.workers:
+            self.assertEqual(worker.shared_max_concurrency.value, 2, f"Worker {worker.id} should have concurrency 2")  # type: ignore
+
+    def test_set_worker_concurrency_remainder(self) -> None:
+        # Setup workers
+        self.load_generator.workers = []
+        for i in range(4):
+            shared_val = mp.Value("i", 0)
+            self.load_generator.workers.append(MockWorker(i, shared_val))  # type: ignore
+
+        # Test concurrency_level = 10 (10 // 4 = 2, 10 % 4 = 2)
+        # Workers 0, 1 should have 3
+        # Workers 2, 3 should have 2
+        self.load_generator._set_worker_concurrency(10)
+
+        self.assertEqual(self.load_generator.workers[0].shared_max_concurrency.value, 3)  # type: ignore
+        self.assertEqual(self.load_generator.workers[1].shared_max_concurrency.value, 3)  # type: ignore
+        self.assertEqual(self.load_generator.workers[2].shared_max_concurrency.value, 2)  # type: ignore
+        self.assertEqual(self.load_generator.workers[3].shared_max_concurrency.value, 2)  # type: ignore
+
+    def test_set_worker_concurrency_less_than_workers(self) -> None:
+        # Setup workers
+        self.load_generator.workers = []
+        for i in range(4):
+            shared_val = mp.Value("i", 0)
+            self.load_generator.workers.append(MockWorker(i, shared_val))  # type: ignore
+
+        # Test concurrency_level = 3
+        # Workers 0, 1 should have 1
+        # Worker 3 should have 0
+        self.load_generator._set_worker_concurrency(3)
+
+        self.assertEqual(self.load_generator.workers[0].shared_max_concurrency.value, 1)  # type: ignore
+        self.assertEqual(self.load_generator.workers[1].shared_max_concurrency.value, 1)  # type: ignore
+        self.assertEqual(self.load_generator.workers[2].shared_max_concurrency.value, 1)  # type: ignore
+        self.assertEqual(self.load_generator.workers[3].shared_max_concurrency.value, 0)  # type: ignore
+
+
+class TestLoadGenerator(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.mock_datagen = MagicMock(spec=DataGenerator)
+        self.mock_datagen.get_data.return_value = iter([MagicMock(preferred_worker_id=-1) for _ in range(100)])
+        self.mock_datagen.is_preferred_worker_requested.return_value = False
+        self.mock_datagen.trace = None
+
+        self.mock_client = AsyncMock(spec=ModelServerClient)
+
+        self.load_config = LoadConfig(
+            type=LoadType.CONSTANT,
+            num_workers=2,
+            worker_max_concurrency=10,
+            interval=1,
+            stages=[StandardLoadStage(rate=10, duration=1)],
+            circuit_breakers=[],
+            base_seed=42,
+        )
+
+        with patch("inference_perf.loadgen.load_generator.get_circuit_breaker"):
+            self.load_generator = LoadGenerator(self.mock_datagen, self.load_config)
+
+    def test_get_lora_adapter(self) -> None:
+        # No config
+        self.assertIsNone(self.load_generator._get_lora_adapter())
+
+        # With config
+        self.load_generator.lora_adapters = ["adapter1", "adapter2"]
+        self.load_generator.lora_weights = [1.0, 0.0]
+
+        np.random.seed(42)  # For reproducibility
+        self.assertEqual(self.load_generator._get_lora_adapter(), "adapter1")
+
+        self.load_generator.lora_weights = [0.0, 1.0]
+        self.assertEqual(self.load_generator._get_lora_adapter(), "adapter2")
+
+    def test_get_timer(self) -> None:
+        from inference_perf.loadgen.load_timer import ConstantLoadTimer, PoissonLoadTimer, TraceReplayLoadTimer
+
+        # Constant
+        self.load_generator.load_type = LoadType.CONSTANT
+        timer = self.load_generator.get_timer(10, 5)
+        self.assertIsInstance(timer, ConstantLoadTimer)
+
+        # Poisson
+        self.load_generator.load_type = LoadType.POISSON
+        timer = self.load_generator.get_timer(10, 5)
+        self.assertIsInstance(timer, PoissonLoadTimer)
+
+        # Trace (Needs trace config setup)
+        self.load_generator.load_type = LoadType.TRACE_REPLAY
+        self.load_generator.trace = TraceConfig(format=TraceFormat.AZURE_PUBLIC_DATASET, file="dummy.csv")
+        self.load_generator.trace_reader = MagicMock()
+        timer = self.load_generator.get_timer(10, 5)
+        self.assertIsInstance(timer, TraceReplayLoadTimer)
+
+    @patch("inference_perf.loadgen.load_generator.sleep", new_callable=AsyncMock)
+    @patch("inference_perf.loadgen.load_generator.time")
+    async def test_run_stage_timeout(self, mock_time: MagicMock, mock_sleep: AsyncMock) -> None:
+        mock_time.time.return_value = 1000
+        mock_time.perf_counter.side_effect = count(0, 10)  # simulate time passing
+
+        request_queue = MagicMock(spec=RequestQueue)
+        request_queue.drain = MagicMock(return_value=Drained(0, True))
+        active_counter = MagicMock()
+        active_counter.value = 0
+        finished_counter = MagicMock()
+        finished_counter.value = 0
+        skipped_counter = MagicMock()
+        skipped_counter.value = 0
+        request_phase = MagicMock()
+        cancel_signal = MagicMock()
+
+        # Force a timeout
+        mock_sleep.return_value = None
+
+        # We need a timer that generates times in the future so the queue loop doesn't instantly finish
+        mock_timer = MagicMock()
+        mock_timer.start_timer.return_value = iter([10.0] * 10)
+        with patch.object(self.load_generator, "get_timer", return_value=mock_timer):
+            await self.load_generator.run_stage(
+                stage_id=0,
+                rate=10,
+                duration=1,
+                request_queue=request_queue,
+                active_requests_counter=active_counter,
+                finished_requests_counter=finished_counter,
+                skipped_requests_counter=skipped_counter,
+                request_phase=request_phase,
+                cancel_signal=cancel_signal,
+                timeout=5.0,
+            )
+
+        # The timeout logic sets the cancel signal
+        cancel_signal.set.assert_called_once()
+        self.assertEqual(self.load_generator.stage_runtime_info[0].status.name, "TIMED_OUT")
+
+    async def test_run_stage_circuit_breaker_open(self) -> None:
+        # A real, already-tripped breaker (not a mocked get_circuit_breaker) exercising the
+        # actual is_open() integration point in run_stage's wait loop.
+        breaker_config = CircuitBreakerConfig(
+            name="test-breaker",
+            metrics=MetricsSpec(matches=["error != `null`"]),
+            triggers=[TriggerConsecutive(type="consecutive", threshold=1)],
+        )
+        breaker = SimpleCircuitBreaker(breaker_config)
+        breaker.feed(
+            RequestLifecycleMetric(
+                scheduled_time=0.0,
+                start_time=0.0,
+                end_time=1.0,
+                request_data="prompt",
+                info=InferenceInfo(request_metrics=RequestMetrics(text=Text(input_tokens=10))),
+                error=ErrorResponseInfo(error_type="timeout", error_msg="boom"),
+            )
+        )
+        self.assertTrue(breaker.is_open())
+        self.load_generator.circuit_breakers = [breaker]
+
+        request_queue = MagicMock(spec=RequestQueue)
+        request_queue.drain = MagicMock(return_value=Drained(0, True))
+        active_counter = MagicMock()
+        active_counter.value = 0
+        finished_counter = MagicMock()
+        finished_counter.value = 0
+        skipped_counter = MagicMock()
+        skipped_counter.value = 0
+        request_phase = MagicMock()
+        cancel_signal = MagicMock()
+
+        # The circuit-breaker check runs before the loop's sleep, so a pre-tripped breaker
+        # exits on the first iteration -- no need to mock time or sleep to reach it.
+        await self.load_generator.run_stage(
+            stage_id=0,
+            rate=10,
+            duration=1,
+            request_queue=request_queue,
+            active_requests_counter=active_counter,
+            finished_requests_counter=finished_counter,
+            skipped_requests_counter=skipped_counter,
+            request_phase=request_phase,
+            cancel_signal=cancel_signal,
+        )
+
+        cancel_signal.set.assert_called_once()
+        self.assertEqual(self.load_generator.stage_runtime_info[0].status.name, "FAILED")
+
+    @patch("inference_perf.loadgen.load_generator.sleep", new_callable=AsyncMock)
+    async def test_run_single_worker_mode(self, mock_sleep: AsyncMock) -> None:
+        # Setup for num_workers = 0 (single worker loop)
+        self.load_generator.num_workers = 0
+        self.load_config.num_workers = 0
+        self.load_generator.stages = [StandardLoadStage(rate=2, duration=1)]
+
+        mock_data = MagicMock(spec=InferenceAPIData)
+        mock_data.preferred_worker_id = -1
+        self.mock_datagen.get_data.return_value = repeat(mock_data)
+
+        # Patch LazyLoadDataMixin to just return the object
+        with (
+            patch("inference_perf.loadgen.load_generator.LazyLoadDataMixin.get_request", return_value=mock_data),
+            patch("inference_perf.loadgen.load_generator.TaskGroup") as MockTaskGroup,
+            patch("inference_perf.loadgen.load_generator.time.perf_counter", return_value=0.0),
+        ):
+            mock_tg = MagicMock()
+            MockTaskGroup.return_value.__aenter__.return_value = mock_tg
+
+            async def dummy_process_request(*args: Any, **kwargs: Any) -> None:
+                pass
+
+            self.mock_client.process_request = AsyncMock(side_effect=dummy_process_request)
+
+            mock_timer = MagicMock()
+            mock_timer.start_timer.return_value = iter([0.1, 0.2])
+            with patch.object(self.load_generator, "get_timer", return_value=mock_timer):
+                await self.load_generator.run(self.mock_client)
+
+            self.assertEqual(mock_tg.create_task.call_count, 2)
+            for call in mock_tg.create_task.call_args_list:
+                call.args[0].close()
+            self.assertEqual(self.load_generator.stage_runtime_info[0].status.name, "COMPLETED")
+
+    # Stage rate=2 duration=1 with the loop already past the stage end (now=1.5) and a timer whose last
+    # request is scheduled exactly at the end (0.5, 1.0): both requests are sent, as the mp path does.
+    @patch("inference_perf.loadgen.load_generator.sleep", new_callable=AsyncMock)
+    async def test_run_single_worker_mode_sends_request_scheduled_at_stage_end(self, mock_sleep: AsyncMock) -> None:
+        sent = await self._run_single_worker_stage(iter([0.5, 1.0]))
+        self.assertEqual(sent, 2)
+
+    # Same stage, but the timer yields a request at 1.5, past the stage end (1.0): only the 0.5 one is sent
+    # and the loop stops at the late one without drawing 1.6, so an endless timer such as the Poisson one still ends the stage.
+    @patch("inference_perf.loadgen.load_generator.sleep", new_callable=AsyncMock)
+    async def test_run_single_worker_mode_drops_request_scheduled_after_stage_end(self, mock_sleep: AsyncMock) -> None:
+        times = iter([0.5, 1.5, 1.6])
+        sent = await self._run_single_worker_stage(times)
+        self.assertEqual(sent, 1)
+        # The loop stopped at 1.5 instead of skipping it, so 1.6 was never drawn from the timer.
+        self.assertEqual(next(times), 1.6)
+
+    async def _run_single_worker_stage(self, times: Iterator[float]) -> int:
+        self.load_generator.num_workers = 0
+        self.load_config.num_workers = 0
+        self.load_generator.stages = [StandardLoadStage(rate=2, duration=1)]
+
+        mock_data = MagicMock(spec=InferenceAPIData)
+        mock_data.preferred_worker_id = -1
+        self.mock_datagen.get_data.return_value = repeat(mock_data)
+
+        # The stage starts at 0.0, every later reading is past the stage end.
+        clock = iter([0.0])
+
+        def perf_counter() -> float:
+            return next(clock, 1.5)
+
+        with (
+            patch("inference_perf.loadgen.load_generator.LazyLoadDataMixin.get_request", return_value=mock_data),
+            patch("inference_perf.loadgen.load_generator.TaskGroup") as MockTaskGroup,
+            patch("inference_perf.loadgen.load_generator.time.perf_counter", side_effect=perf_counter),
+        ):
+            mock_tg = MagicMock()
+            MockTaskGroup.return_value.__aenter__.return_value = mock_tg
+            self.mock_client.process_request = AsyncMock()
+
+            mock_timer = MagicMock()
+            mock_timer.start_timer.return_value = times
+            with patch.object(self.load_generator, "get_timer", return_value=mock_timer):
+                await self.load_generator.run(self.mock_client)
+
+            for call in mock_tg.create_task.call_args_list:
+                call.args[0].close()
+            return int(mock_tg.create_task.call_count)
+
+    async def test_drain(self) -> None:
+        from inference_perf.apis.chat import ChatCompletionAPIData, ChatMessage
+
+        q: RequestQueue[RequestQueueData] = RequestQueue(1)
+        # Payload must be picklable: the queue's feeder thread silently drops
+        # anything it cannot serialize (e.g. MagicMock).
+        dummy_data = ChatCompletionAPIData(messages=[ChatMessage(role="user", content="drain me")])
+        q.put(RequestQueueData(0, dummy_data, 0.0, None), 0)
+        q.put(RequestQueueData(0, dummy_data, 0.0, None), 0)
+
+        drained = q.drain(0)
+        self.assertEqual(drained, (2, True))
+        self.assertTrue(q.get_channel(0).empty())
+
+    def test_sigint_and_sigterm_interrupt_the_run(self) -> None:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signum=signum):
+                self.load_generator.interrupt_sig = False
+                handler = signal.getsignal(signum)
+                assert callable(handler)
+                handler(signum, None)
+                self.assertTrue(self.load_generator.interrupt_sig)
+
+    @patch("inference_perf.loadgen.load_generator.sleep", new_callable=AsyncMock)
+    async def test_sigint_without_timeout_is_interrupted(self, mock_sleep: AsyncMock) -> None:
+        """SIGINT must be recorded as INTERRUPTED, distinct from a real timeout, even
+        though both exit the same wait loop the same way."""
+        self.load_generator.interrupt_sig = True
+
+        async def advance_counter(*_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        mock_sleep.side_effect = advance_counter
+
+        await self.load_generator.run_stage(
+            stage_id=4,
+            rate=1.0,
+            duration=1,
+            request_queue=MagicMock(put=MagicMock(), join=MagicMock()),
+            active_requests_counter=mp.Value("i", 0),
+            finished_requests_counter=mp.Value("i", 0),
+            skipped_requests_counter=mp.Value("i", 0),
+            request_phase=mp.Event(),
+            cancel_signal=mp.Event(),
+            timeout=None,
+        )
+
+        self.assertEqual(self.load_generator.stage_runtime_info[4].status.name, "INTERRUPTED")
+
+    @patch("inference_perf.loadgen.load_generator.sleep", new_callable=AsyncMock)
+    async def test_completed_stage_is_not_relabeled_by_unclean_teardown_guard(self, mock_sleep: AsyncMock) -> None:
+        """Sanity check that the normal completion path is untouched by the new
+        cause-tracking: no timeout, no SIGINT, requests finish -> COMPLETED."""
+        finished_counter = mp.Value("i", 0)
+
+        async def advance_counter(*_args: Any, **_kwargs: Any) -> None:
+            finished_counter.value = 1
+
+        mock_sleep.side_effect = advance_counter
+
+        await self.load_generator.run_stage(
+            stage_id=5,
+            rate=1.0,
+            duration=1,
+            request_queue=MagicMock(put=MagicMock(), join=MagicMock()),
+            active_requests_counter=mp.Value("i", 0),
+            finished_requests_counter=finished_counter,
+            skipped_requests_counter=mp.Value("i", 0),
+            request_phase=mp.Event(),
+            cancel_signal=None,
+        )
+
+        self.assertEqual(self.load_generator.stage_runtime_info[5].status.name, "COMPLETED")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,257 @@
+from typing import cast
+
+import pytest
+
+from inference_perf.apis import ErrorResponseInfo, InferenceInfo, RequestLifecycleMetric, StreamedResponseMetrics
+from inference_perf.config import PerRequestFieldsConfig
+from inference_perf.payloads import RequestMetrics, Text
+from inference_perf.reportgen.base import build_per_request_lifecycle_entry
+from inference_perf.utils.custom_tokenizer import CustomTokenizer
+
+
+class _FakeTokenizer:
+    def count_tokens(self, text: str, add_special_tokens: bool = True) -> int:
+        return len(text.split())
+
+
+def _metric() -> RequestLifecycleMetric:
+    return RequestLifecycleMetric(
+        stage_id=0,
+        scheduled_time=0.0,
+        start_time=1.0,
+        end_time=2.0,
+        request_data="raw request",
+        response_data="raw response",
+        info=InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+            response_metrics=StreamedResponseMetrics(
+                output_tokens=2,
+                response_chunks=['{"choices": [{"text": "hello"}]}'],
+                chunk_times=[1.5],
+                output_token_times=[1.5],
+            ),
+        ),
+        error=None,
+    )
+
+
+def test_per_request_fields_default_preserves_full_report_shape() -> None:
+    entry = build_per_request_lifecycle_entry(_metric(), PerRequestFieldsConfig())
+
+    assert entry["start_time"] == 1.0
+    assert entry["end_time"] == 2.0
+    assert entry["request"] == "raw request"
+    assert entry["response"] == "raw response"
+    assert entry["info"]["response_metrics"]["response_chunks"] == ['{"choices": [{"text": "hello"}]}']
+    assert entry["error"] is None
+
+
+def test_per_request_fields_can_omit_top_level_raw_fields() -> None:
+    entry = build_per_request_lifecycle_entry(
+        _metric(),
+        PerRequestFieldsConfig(request=False, response=False, info=False),
+    )
+
+    assert "request" not in entry
+    assert "response" not in entry
+    assert "info" not in entry
+    assert entry["start_time"] == 1.0
+    assert entry["end_time"] == 2.0
+    assert entry["error"] is None
+
+
+def test_per_request_fields_can_omit_response_chunks_without_mutating_metric() -> None:
+    metric = _metric()
+    entry = build_per_request_lifecycle_entry(metric, PerRequestFieldsConfig(response_chunks=False))
+
+    response_metrics = entry["info"]["response_metrics"]
+    assert "response_chunks" not in response_metrics
+    assert response_metrics["chunk_times"] == [1.5]
+    assert response_metrics["output_token_times"] == [1.5]
+    assert isinstance(metric.info.response_metrics, StreamedResponseMetrics)
+    assert metric.info.response_metrics.response_chunks == ['{"choices": [{"text": "hello"}]}']
+
+
+_CONTENT_CHUNKS = ['{"choices": [{"delta": {"content": "hi"}}]}']
+_REASONING_CHUNKS = [
+    '{"choices": [{"delta": {"reasoning_content": "let"}}]}',
+    '{"choices": [{"delta": {"reasoning_content": " me think"}}]}',
+]
+
+
+# A reasoning model's stream: reasoning chunks at 1.2s and 1.4s, then one content chunk at 1.6s.
+def _reasoning_metric() -> RequestLifecycleMetric:
+    metric = _metric()
+    metric.info.response_metrics = StreamedResponseMetrics(
+        output_tokens=4,
+        response_chunks=list(_CONTENT_CHUNKS),
+        chunk_times=[1.6],
+        reasoning_chunks=list(_REASONING_CHUNKS),
+        reasoning_chunk_times=[1.2, 1.4],
+        output_token_times=[1.2, 1.4, 1.4, 1.6],
+    )
+    return metric
+
+
+# response_chunks=False on that stream writes no chunk list from either channel.
+# Both channels' arrival times stay, and the in-memory metric keeps its chunks.
+def test_per_request_fields_omit_response_chunks_drops_both_channels() -> None:
+    metric = _reasoning_metric()
+    entry = build_per_request_lifecycle_entry(metric, PerRequestFieldsConfig(response_chunks=False))
+
+    response_metrics = entry["info"]["response_metrics"]
+    assert [key for key in response_metrics if key.endswith("_chunks")] == []
+    assert response_metrics["chunk_times"] == [1.6]
+    assert response_metrics["reasoning_chunk_times"] == [1.2, 1.4]
+    assert isinstance(metric.info.response_metrics, StreamedResponseMetrics)
+    assert metric.info.response_metrics.response_chunks == _CONTENT_CHUNKS
+    assert metric.info.response_metrics.reasoning_chunks == _REASONING_CHUNKS
+
+
+# response_chunks=True on the same stream writes both chunk lists exactly as received.
+def test_per_request_fields_include_response_chunks_keeps_both_channels() -> None:
+    entry = build_per_request_lifecycle_entry(_reasoning_metric(), PerRequestFieldsConfig(response_chunks=True))
+
+    response_metrics = entry["info"]["response_metrics"]
+    assert response_metrics["response_chunks"] == _CONTENT_CHUNKS
+    assert response_metrics["reasoning_chunks"] == _REASONING_CHUNKS
+
+
+def test_per_request_fields_computed_metrics_disabled_by_default() -> None:
+    entry = build_per_request_lifecycle_entry(_metric(), PerRequestFieldsConfig())
+
+    assert "computed_metrics" not in entry
+
+
+def test_per_request_fields_computed_metrics_can_be_enabled() -> None:
+    entry = build_per_request_lifecycle_entry(_metric(), PerRequestFieldsConfig(computed_metrics=True))
+
+    assert entry["computed_metrics"] == {
+        "request_latency": 1.0,
+        "normalized_time_per_output_token": 0.5,
+        "time_to_first_token": None,
+        "time_to_first_output_token": None,
+        "time_per_output_token": None,
+        "inter_token_latency": None,
+        "inter_token_latencies": [],
+        "input_tokens": 5,
+        "output_tokens": 2,
+        "ttft_slo_sec": None,
+        "tpot_slo_sec": None,
+    }
+
+
+def test_per_request_fields_disabled_computed_metrics_does_not_mutate_token_metrics() -> None:
+    metric = _metric()
+
+    build_per_request_lifecycle_entry(
+        metric, PerRequestFieldsConfig(computed_metrics=False), tokenizer=cast(CustomTokenizer, _FakeTokenizer())
+    )
+
+    assert isinstance(metric.info.response_metrics, StreamedResponseMetrics)
+    assert metric.info.response_metrics.output_tokens == 2
+    assert metric.info.response_metrics.output_token_times == [1.5]
+
+
+def test_per_request_fields_computed_metrics_omitted_for_failed_requests() -> None:
+    metric = _metric()
+    metric.error = ErrorResponseInfo(error_type="TimeoutError", error_msg="boom")
+
+    entry = build_per_request_lifecycle_entry(metric, PerRequestFieldsConfig(computed_metrics=True))
+
+    assert "computed_metrics" not in entry
+
+
+def test_per_request_fields_computed_metrics_uses_tokenizer_corrected_chunks() -> None:
+    metric = RequestLifecycleMetric(
+        stage_id=0,
+        scheduled_time=0.0,
+        start_time=1.0,
+        end_time=2.0,
+        request_data="raw request",
+        response_data="raw response",
+        info=InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+            response_metrics=StreamedResponseMetrics(
+                output_tokens=4,
+                response_chunks=[
+                    '{"choices": [{"text": "hello"}]}',
+                    '{"choices": [{"text": " world foo"}]}',
+                ],
+                chunk_times=[1.2, 1.6],
+                output_token_times=[],
+            ),
+        ),
+        error=None,
+    )
+
+    entry = build_per_request_lifecycle_entry(
+        metric, PerRequestFieldsConfig(computed_metrics=True), tokenizer=cast(CustomTokenizer, _FakeTokenizer())
+    )
+
+    assert entry["info"]["response_metrics"]["output_token_times"] == pytest.approx([1.2, 1.6, 1.6])
+    assert entry["computed_metrics"]["time_to_first_token"] == pytest.approx(0.2)
+    assert entry["computed_metrics"]["time_per_output_token"] == pytest.approx(0.1333333333333334)
+    assert entry["computed_metrics"]["inter_token_latency"] == pytest.approx(0.2)
+    assert entry["computed_metrics"]["inter_token_latencies"] == pytest.approx([0.4, 0.0])
+    assert entry["computed_metrics"]["input_tokens"] == 5
+    # The correction sets output_token_times only; output_tokens keeps the API layer's
+    # whole-message count (see #564).
+    assert entry["computed_metrics"]["output_tokens"] == 4
+
+
+def test_per_request_fields_include_session_ids_when_set() -> None:
+    metric = _metric()
+    metric.session_id = "wekatrace5_05658118df5d398eec4703ce4fafe679ab30"
+    metric.request_session_id = "wekatrace5_05658118df5d398eec4703ce4fafe679ab30::sa:agent-1:s0"
+
+    entry = build_per_request_lifecycle_entry(metric, PerRequestFieldsConfig(request=False, response=False, info=False))
+
+    assert entry["session_id"] == "wekatrace5_05658118df5d398eec4703ce4fafe679ab30"
+    assert entry["request_session_id"] == "wekatrace5_05658118df5d398eec4703ce4fafe679ab30::sa:agent-1:s0"
+
+
+def test_per_request_fields_keep_parent_session_id_without_request_session_id() -> None:
+    metric = _metric()
+    metric.session_id = "wekatrace5_05658118df5d398eec4703ce4fafe679ab30"
+
+    entry = build_per_request_lifecycle_entry(metric, PerRequestFieldsConfig())
+
+    assert entry["session_id"] == "wekatrace5_05658118df5d398eec4703ce4fafe679ab30"
+    assert "request_session_id" not in entry
+
+
+def test_per_request_fields_omit_session_ids_when_absent() -> None:
+    entry = build_per_request_lifecycle_entry(_metric(), PerRequestFieldsConfig())
+
+    assert "session_id" not in entry
+    assert "request_session_id" not in entry
+
+
+@pytest.mark.parametrize("include_raw", [True, False])
+@pytest.mark.parametrize("failed", [True, False])
+def test_per_request_entries_preserve_stage_and_schedule(include_raw: bool, failed: bool) -> None:
+    fields = PerRequestFieldsConfig(request=include_raw, response=include_raw, info=include_raw)
+    entries = []
+    for stage_id, scheduled_time in [(0, 0.0), (2, 0.125)]:
+        metric = _metric()
+        metric.stage_id = stage_id
+        metric.scheduled_time = scheduled_time
+        if failed:
+            metric.error = ErrorResponseInfo(error_type="test", error_msg="request failed")
+        entries.append(build_per_request_lifecycle_entry(metric, fields))
+
+    # Identical send times cannot identify the stage or recover its scheduled time.
+    assert [entry["start_time"] for entry in entries] == [1.0, 1.0]
+    assert [entry["stage_id"] for entry in entries] == [0, 2]
+    assert [entry["scheduled_time"] for entry in entries] == [0.0, 0.125]
+
+
+def test_per_request_fields_omit_stage_id_when_absent() -> None:
+    metric = _metric()
+    metric.stage_id = None
+
+    entry = build_per_request_lifecycle_entry(metric, PerRequestFieldsConfig())
+
+    assert "stage_id" not in entry
+    assert entry["scheduled_time"] == metric.scheduled_time

@@ -15,13 +15,19 @@ To contribute to this project, please adhere to the following procedure:
 - **Create an issue** detailing the proposed changes. Upon confirmation of assignment, you may proceed to submit a Pull Request.
 - **Initial Setup**: Run `pdm run setup` to install dependencies and set up pre-commit hooks.
 - Implement the required code modifications and perform **manual verification** by executing a benchmark run.
-- **Include comprehensive unit tests** to validate the changes. You can use `pdm test:picked` to run tests only on modified files.
+- **Include comprehensive unit tests** to validate the changes. You can use `pdm run test:picked` to run tests only on modified files.
 - Execute **validation** before pushing:
-  - `pdm check`: Fast check (formatting and linting).
-  - `pdm run validate`: Full check (formatting, linting, and strict type checking).
-- Conduct **full test execution and code coverage analysis** using `pdm test` and `pdm check:cov`.
+  - `pdm run check`: Fast check (formatting and linting).
+  - `pdm run validate`: Full check (formatting, linting, strict type checking, and CLI-flags doc sync).
+  - Both only verify formatting and never rewrite files, so run `pdm run format` to fix any formatting they report.
+- Conduct **full test execution and code coverage analysis** using `pdm run test`, `pdm run check:cov` and `pdm run check:mutation` (see [docs/mutation_testing.md](docs/mutation_testing.md)).
+- All development commands are defined as pdm scripts; run `pdm run --list` to see the full list with descriptions.
 - **Branch Up-to-Date Requirement**: Your branch must be based on the latest `origin/main` before you can push. A pre-push hook enforces this by running `git fetch origin main` automatically. If it fails, you will need to rebase or merge `origin/main`.
 - **Submit the Pull Request** utilizing the provided template.
+
+### Regression tests for bug fixes
+
+A PR that fixes a behavioral bug should include the bug's reproduction as a test: a unit test where the bug reproduces in process, an e2e test where it only shows up end to end (a wrong metric in a full run, a report that disagrees with what the server actually sent). The test should fail on the code before the fix and pass after it, and reviewers should ask for it when a fix arrives without one. This is a norm rather than a CI gate: documentation, logging, and dependency changes have nothing to pin, and some fixes are already covered by an existing test. Shipping a fix without its repro should be a deliberate call, not an oversight.
 
 ### Resources
 - [Contributor License Agreement](https://git.k8s.io/community/CLA.md) - Kubernetes projects require that you sign a Contributor License Agreement (CLA) before we can accept your pull requests

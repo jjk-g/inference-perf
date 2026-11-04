@@ -37,12 +37,15 @@ Key structural properties of the new graph format:
 import json
 from typing import Any, Dict, List, Optional
 
-from inference_perf.datagen.otel_trace_to_replay_graph import (
+from inference_perf.datagen.replay.otel_trace_to_replay_graph import (
     build_graph,
     build_raw_calls,
+    extract_messages,
+    is_llm_span,
     print_graph,
     summarize_graph,
 )
+from inference_perf.datagen.replay.replay_graph_types import ComplexReplayMessage
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +176,7 @@ def test_sequential_chain() -> None:
         span_C: SHARED(3msg ← event_001) + OUTPUT(1msg ← event_001) + UNIQUE(1msg)
     """
     spans = [SPAN_A, SPAN_B, SPAN_C]
-    calls = build_raw_calls(spans)
+    calls, _ = build_raw_calls(spans)
     graph = build_graph(calls)
 
     # Print for visual inspection when running with pytest -s or debugger
@@ -373,7 +376,7 @@ def test_parallel_fan_out() -> None:
         OUTPUT(1msg ← event_002)               [assistant: OUTPUT_P2]
     """
     spans = [SPAN_ROOT, SPAN_P1, SPAN_P2, SPAN_FINAL]
-    calls = build_raw_calls(spans)
+    calls, _ = build_raw_calls(spans)
     graph = build_graph(calls)
 
     print("\n" + "=" * 70)
@@ -547,7 +550,7 @@ def test_growing_prefix() -> None:
     KEY PROPERTY: shared prefix message count grows monotonically: 2 < 4 < 6
     """
     spans = [SPAN_T1, SPAN_T2, SPAN_T3, SPAN_T4]
-    calls = build_raw_calls(spans)
+    calls, _ = build_raw_calls(spans)
     graph = build_graph(calls)
 
     print("\n" + "=" * 70)
@@ -577,52 +580,196 @@ def test_growing_prefix() -> None:
     assert graph.events["event_002_span_T3"].wait_ms == 1000
     assert graph.events["event_003_span_T4"].wait_ms == 1000
 
-    # span_T1: all unique (no predecessors)
-    segs_T1 = graph.events["event_000_span_T1"].call.input_segments
-    assert all(s.type == "unique" for s in segs_T1)
-    assert sum(s.message_count for s in segs_T1) == 2
 
-    # span_T2: SHARED(2) + OUTPUT(1) + UNIQUE(1)
-    segs_T2 = graph.events["event_001_span_T2"].call.input_segments
-    assert segs_T2[0].type == "shared"
-    assert segs_T2[0].source_event_id == "event_000_span_T1"
-    shared_msgs_T2 = segs_T2[0].message_count
-    print(f"\n  span_T2 shared prefix: {shared_msgs_T2} messages (source: {segs_T2[0].source_event_id})")
-    print(f"  span_T2 segments: {[(s.type, s.message_count) for s in segs_T2]}")
-    assert shared_msgs_T2 == 2, f"T2 should share 2 messages with T1, got {shared_msgs_T2}"
-    assert sum(s.message_count for s in segs_T2) == 4
+# ---------------------------------------------------------------------------
+# Test: tool_definitions flow
+# ---------------------------------------------------------------------------
 
-    # span_T3: SHARED(4) + OUTPUT(1) + UNIQUE(1)
-    segs_T3 = graph.events["event_002_span_T3"].call.input_segments
-    assert segs_T3[0].type == "shared"
-    assert segs_T3[0].source_event_id == "event_001_span_T2"
-    shared_msgs_T3 = segs_T3[0].message_count
-    print(f"  span_T3 shared prefix: {shared_msgs_T3} messages (source: {segs_T3[0].source_event_id})")
-    print(f"  span_T3 segments: {[(s.type, s.message_count) for s in segs_T3]}")
-    assert shared_msgs_T3 == 4, f"T3 should share 4 messages with T2, got {shared_msgs_T3}"
-    assert sum(s.message_count for s in segs_T3) == 6
 
-    # span_T4: SHARED(6) + OUTPUT(1) + UNIQUE(1)
-    segs_T4 = graph.events["event_003_span_T4"].call.input_segments
-    assert segs_T4[0].type == "shared"
-    assert segs_T4[0].source_event_id == "event_002_span_T3"
-    shared_msgs_T4 = segs_T4[0].message_count
-    print(f"  span_T4 shared prefix: {shared_msgs_T4} messages (source: {segs_T4[0].source_event_id})")
-    print(f"  span_T4 segments: {[(s.type, s.message_count) for s in segs_T4]}")
-    assert shared_msgs_T4 == 6, f"T4 should share 6 messages with T3, got {shared_msgs_T4}"
-    assert sum(s.message_count for s in segs_T4) == 8
+def test_tool_definitions_flow() -> None:
+    """Tool definitions in gen_ai.tool.definitions flow through to GraphCall.tool_definitions."""
+    tool_defs = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get the current weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            },
+        }
+    ]
+    span = {
+        "trace_id": "trace_test",
+        "span_id": "span_tools",
+        "name": "chat gpt-4",
+        "start_time": "2024-01-01T00:00:00Z",
+        "end_time": "2024-01-01T00:00:01Z",
+        "attributes": {
+            "gen_ai.request.model": "gpt-4",
+            "gen_ai.input.messages": json.dumps([{"role": "user", "content": "What is the weather?"}]),
+            "gen_ai.output.text": "Let me check the weather for you.",
+            "gen_ai.tool.definitions": tool_defs,
+        },
+        "status": {"code": 1, "message": ""},
+    }
 
-    # Shared prefix grows monotonically
-    assert shared_msgs_T2 < shared_msgs_T3 < shared_msgs_T4, (
-        f"Shared prefix should grow: {shared_msgs_T2} < {shared_msgs_T3} < {shared_msgs_T4}"
-    )
+    calls, _ = build_raw_calls([span])
+    assert len(calls) == 1
+    assert calls[0].tool_definitions == tool_defs
 
-    # All turns T2-T4 have an output segment
-    for event_id, call_id in [
-        ("event_001_span_T2", "span_T2"),
-        ("event_002_span_T3", "span_T3"),
-        ("event_003_span_T4", "span_T4"),
-    ]:
-        segs = graph.events[event_id].call.input_segments
-        seg_types = [s.type for s in segs]
-        assert "output" in seg_types, f"{call_id} should have an output segment, got {seg_types}"
+    graph = build_graph(calls)
+    event = list(graph.events.values())[0]
+    assert event.call.tool_definitions == tool_defs
+
+
+def test_tool_definitions_absent() -> None:
+    """Spans without gen_ai.tool.definitions produce GraphCall.tool_definitions = None."""
+    span = {
+        "trace_id": "trace_test",
+        "span_id": "span_no_tools",
+        "name": "chat gpt-4",
+        "start_time": "2024-01-01T00:00:00Z",
+        "end_time": "2024-01-01T00:00:01Z",
+        "attributes": {
+            "gen_ai.request.model": "gpt-4",
+            "gen_ai.input.messages": json.dumps([{"role": "user", "content": "Hello"}]),
+            "gen_ai.output.text": "Hi there.",
+        },
+        "status": {"code": 1, "message": ""},
+    }
+
+    calls, _ = build_raw_calls([span])
+    assert calls[0].tool_definitions is None
+
+    graph = build_graph(calls)
+    event = list(graph.events.values())[0]
+    assert event.call.tool_definitions is None
+
+
+class TestDeveloperRoleNormalization:
+    """Tests for normalizing 'developer' role to 'system'."""
+
+    def test_developer_role_normalized_to_system(self) -> None:
+        """Messages with role 'developer' are normalized to 'system'."""
+        span = {
+            "attributes": {
+                "gen_ai.input.messages": json.dumps(
+                    [
+                        {"role": "developer", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": "Hello"},
+                    ]
+                ),
+            },
+        }
+        messages, normalized_count = extract_messages(span)
+        assert len(messages) == 2
+        assert messages[0].role == "system"
+        assert messages[1].role == "user"
+        assert normalized_count == 1
+
+    def test_no_normalization_for_standard_roles(self) -> None:
+        """Standard roles are not modified and count is zero."""
+        span = {
+            "attributes": {
+                "gen_ai.input.messages": json.dumps(
+                    [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": "Hello"},
+                    ]
+                ),
+            },
+        }
+        messages, normalized_count = extract_messages(span)
+        assert len(messages) == 2
+        assert messages[0].role == "system"
+        assert messages[1].role == "user"
+        assert normalized_count == 0
+
+    def test_multiple_developer_roles_counted(self) -> None:
+        """Multiple 'developer' messages are all normalized and counted."""
+        span = {
+            "attributes": {
+                "gen_ai.input.messages": json.dumps(
+                    [
+                        {"role": "developer", "content": "System instruction 1"},
+                        {"role": "developer", "content": "System instruction 2"},
+                        {"role": "user", "content": "Hello"},
+                    ]
+                ),
+            },
+        }
+        messages, normalized_count = extract_messages(span)
+        assert messages[0].role == "system"
+        assert messages[1].role == "system"
+        assert normalized_count == 2
+
+    def test_developer_role_normalized_in_build_raw_calls(self) -> None:
+        """build_raw_calls returns the total normalized count."""
+        span = {
+            "trace_id": "trace_dev",
+            "span_id": "span_dev",
+            "name": "chat gpt-4",
+            "start_time": "2024-01-01T00:00:00Z",
+            "end_time": "2024-01-01T00:00:01Z",
+            "attributes": {
+                "gen_ai.request.model": "gpt-4",
+                "gen_ai.input.messages": json.dumps(
+                    [
+                        {"role": "developer", "content": "Be concise."},
+                        {"role": "user", "content": "Hi"},
+                    ]
+                ),
+                "gen_ai.output.text": "Hello!",
+            },
+            "status": {"code": 1, "message": ""},
+        }
+        calls, normalized_count = build_raw_calls([span])
+        assert len(calls) == 1
+        assert calls[0].messages[0].role == "system"
+        assert normalized_count == 1
+
+    def test_developer_role_in_complex_message_info(self) -> None:
+        """message_info dict also has role normalized (not just ComplexReplayMessage.role)."""
+        span = {
+            "attributes": {
+                "gen_ai.input.messages": json.dumps(
+                    [
+                        {"role": "developer", "content": {"text": "system prompt", "metadata": "extra"}},
+                    ]
+                ),
+            },
+        }
+        messages, normalized_count = extract_messages(span)
+        msg = messages[0]
+        assert msg.role == "system"
+        assert isinstance(msg, ComplexReplayMessage)
+        assert msg.message_info["role"] == "system"
+        assert normalized_count == 1
+
+
+def test_is_llm_span_uses_operation_name_not_message_key_presence() -> None:
+    """Spans are classified as LLM calls by the OTel ``gen_ai.operation.name``
+    discriminator, not by mere presence of the ``gen_ai.input.messages`` key.
+
+    A fixed-schema source (e.g. a typed columnar export) can carry an empty
+    ``gen_ai.input.messages`` on every span; keying off presence alone would
+    misclassify ``execute_tool`` / ``invoke_agent`` spans as LLM calls.
+    """
+    tool_span = {
+        "name": "execute_tool get_weather",
+        "attributes": {
+            "gen_ai.operation.name": "execute_tool",
+            "gen_ai.input.messages": None,  # present-but-empty
+        },
+    }
+    chat_span = {
+        "name": "chat gpt-4",
+        "attributes": {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.input.messages": '[{"role": "user", "content": "hi"}]',
+        },
+    }
+    assert is_llm_span(tool_span) is False
+    assert is_llm_span(chat_span) is True

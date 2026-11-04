@@ -1,3 +1,5 @@
+# The workflow name is load-bearing: merge_gate.yml keys on it, in both its
+# workflow_run trigger and its REQUIRED_WORKFLOWS list. Rename in lockstep.
 name: E2E Test on change
 
 on:
@@ -12,28 +14,368 @@ on:
 
 jobs:
   e2e-tests:
-    runs-on: ubuntu-latest
+    # ARM, not x86: the live-oracle step below starts a real vLLM CPU server,
+    # and the ubuntu-latest x86 pool hands out several CPU models, some of
+    # which cannot run it (AMD EPYC 9xxx VMs with AVX-512 masked by the
+    # hypervisor: vLLM's sampler is a Triton kernel that triton-cpu compiles
+    # for the host CPU name, znver4, so the worker traps on invalid opcode).
+    # That made the job red on a runner draw, not on a code change. GitHub's
+    # ARM pool is one CPU, so the same job on it is deterministic; there is
+    # no way to pin a CPU model within the x86 pool.
+    runs-on: ubuntu-24.04-arm
+    env:
+      VLLM_MODEL: facebook/opt-125m
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # The version table lives with the tests (e2e/vllm_releases.txt), so
+      # adding or pruning a release is a reviewed code change next to the
+      # tests that run against it. This step only loads it; an empty table
+      # fails here because a zero-iteration live-oracle loop below would
+      # pass silently, and a merge gate whose oracle silently skips gates
+      # nothing.
+      - name: Load vLLM version table
+        run: |
+          versions="$(grep -vE '^[[:space:]]*(#|$)' e2e/vllm_releases.txt | xargs)"
+          [ -n "$versions" ]
+          echo "VLLM_VERSIONS=$versions" >> "$GITHUB_ENV"
+          echo "VLLM_HF_CACHE=$HOME/hf-cache" >> "$GITHUB_ENV"
+
+      - name: Cache model weights
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/hf-cache
+          key: hf-${{ env.VLLM_MODEL }}
+
+      # Backgrounded so the pulls overlap the Nix and dependency install
+      # below; the per-version docker run later pulls anything not local
+      # yet, so a failure here costs time, not correctness.
+      - name: Prefetch vLLM images
+        run: |
+          for v in $VLLM_VERSIONS; do
+            docker pull "docker.io/vllm/vllm-openai-cpu:$v" > /dev/null 2>&1 &
+          done
 
       - name: Install Nix
         uses: cachix/install-nix-action@4eae8bea4afaa8f8ea8aa638ab9a7fead2f3d21e # v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Cache the Nix store (dev shell closure, including the sim built from
+      # source) keyed on the flake files. On a key miss the nearest older
+      # cache is restored and Nix fetches only the delta.
+      - name: Restore and save Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
+      # Cache the pdm venv. Keyed on the flake files too because the venv's
+      # interpreter is the store path of the dev shell's Python.
+      - name: Restore pdm venv
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .venv
+          key: venv-nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'pdm.lock') }}
+
+      # Kept on cache hits: pdm sync verifies the restored venv against
+      # pdm.lock in seconds and repairs a partial restore.
       - name: Install dependencies
         run: |
           nix develop -c pdm sync -d
 
-      - name: Run end-to-end tests
+      # guidellm is the second tool in the cross-tool parity test
+      # (e2e/tests/test_reasoning_metric_parity.py). It gets its own venv,
+      # outside the Nix shell and pdm.lock, because its dependency set
+      # (pydantic, datasets, torch) is not inference-perf's. The lock file is
+      # the cache key, so bumping the pin is a reviewed change that rebuilds
+      # the venv. GUIDELLM_REQUIRED turns "guidellm not found" and "wrong
+      # version" from a skip into a failure: this job gates merges.
+      - name: Restore guidellm venv
+        id: guidellm-venv
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/guidellm-venv
+          key: guidellm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('e2e/guidellm_requirements.txt') }}
+
+      - name: Install guidellm
+        run: |
+          set -euxo pipefail
+          if [ "${{ steps.guidellm-venv.outputs.cache-hit }}" != "true" ]; then
+            rm -rf ~/guidellm-venv
+            python3 -m venv ~/guidellm-venv
+            ~/guidellm-venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+              -r e2e/guidellm_requirements.txt
+          fi
+          ~/guidellm-venv/bin/guidellm --version
+          echo "GUIDELLM_BIN=$HOME/guidellm-venv/bin/guidellm" >> "$GITHUB_ENV"
+          echo "GUIDELLM_REQUIRED=1" >> "$GITHUB_ENV"
+
+      # The vLLM live-oracle modules (e2e/tests/test_vllm_cpu_*.py) skip in
+      # this invocation: no server is up yet. They run against every table
+      # version in the next step.
+      - name: Run end-to-end tests (sim suite)
         run: |
           set -euxo pipefail
           nix develop -c pdm run test:e2e -o log_cli_level=DEBUG |& tee test_e2e.out
 
-      - name: Upload test_e2e.out
+      # Real-server oracle for the live-tier slice: CPU mode changes
+      # generation speed, not token accounting, so a plain runner can check
+      # our numbers against a real vLLM's tokenizer, usage accounting, and
+      # /metrics exposition. The server is required: a release whose server
+      # cannot start fails the job rather than skipping, because a merge
+      # gate whose oracle silently skips gates nothing. Every release runs
+      # even after one fails, so a red run names all failed releases.
+      #
+      # What runs lives in the test tree: the release table is
+      # e2e/vllm_releases.txt, the server invocation is
+      # e2e/vllm_cpu_server.sh, and test:e2e:live selects every
+      # e2e/tests/test_vllm_*.py. Only CI plumbing (prefetch, caching, step
+      # summary, artifacts) belongs here.
+      - name: Run live-oracle e2e tests per vLLM version
+        run: |
+          set -uo pipefail
+          failed=""
+          ran=0
+          for v in $VLLM_VERSIONS; do
+            if e2e/vllm_cpu_server.sh start "$v"; then
+              # A red release must name what it resolved to; latest
+              # points at a different release over time. The venv python
+              # directly, not via nix develop: the dev shell's hook runs a
+              # pdm sync whose stdout would land in the captured value.
+              resolved="$(.venv/bin/python e2e/known_bad.py version http://127.0.0.1:8000 || echo unknown)"
+              {
+                echo "### $v resolved to"
+                echo '```'
+                echo "$resolved"
+                docker inspect --format '{{index .RepoDigests 0}}' \
+                  "docker.io/vllm/vllm-openai-cpu:$v" || true
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+
+              # A release listed in e2e/vllm_known_bad.txt is skipped, not
+              # failed, and loudly: the annotation names it on every run
+              # until the tag floats past it. A helper that cannot decide fails
+              # the release rather than running it against what may be broken.
+              if ! reason="$(.venv/bin/python e2e/known_bad.py skip-reason "$v" "$resolved")"; then
+                echo "::error::$v: e2e/known_bad.py skip-reason failed, see the log"
+                failed="$failed $v"
+              elif [ -n "$reason" ]; then
+                echo "::warning::$v resolved to $resolved, skipped: $reason"
+                echo "skipped: $reason" >> "$GITHUB_STEP_SUMMARY"
+              else
+                ran=$((ran + 1))
+                E2E_VLLM_BASE_URL=http://127.0.0.1:8000 E2E_VLLM_VERSION="$v" \
+                  nix develop -c pdm run test:e2e:live -o log_cli_level=DEBUG \
+                  |& tee "test_vllm_e2e-$v.out" || failed="$failed $v"
+              fi
+            else
+              failed="$failed $v"
+            fi
+
+            e2e/vllm_cpu_server.sh logs > "vllm_server-$v.log" 2>&1 || true
+            e2e/vllm_cpu_server.sh stop > /dev/null 2>&1 || true
+          done
+
+          if [ -n "$failed" ]; then
+            echo "::error::live-oracle slice failed for:$failed"
+            exit 1
+          fi
+          # Every release skipped tests nothing, so it fails like an empty table.
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::every release in e2e/vllm_releases.txt was skipped as known-bad"
+            exit 1
+          fi
+
+      - name: Upload e2e outputs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test_e2e
-          path: test_e2e.out
+          path: |
+            test_e2e.out
+            test_vllm_e2e-*.out
+            vllm_server-*.log
+
+  # The multimodal half of the same cpu-vllm oracle: does a real server
+  # accept the payloads the multimodal datagens build? One vision-language
+  # server and one speech server per release in
+  # e2e/vllm_multimodal_releases.txt, running
+  # e2e/tests/test_vllm_cpu_multimodal.py against each.
+  #
+  # A separate job rather than more steps in e2e-tests, because the two
+  # halves need different models, context lengths, chat templates, and
+  # release pins, and because two jobs finish in the wall clock of the
+  # slower one. Runner minutes are free on a public repo; merge latency is
+  # not. It is in this workflow, and not one of its own, so that it gates:
+  # the merge gate keys on workflow name, and an oracle that runs after the
+  # merge catches a rejected payload the morning after it lands.
+  multimodal-e2e:
+    # ARM for the reason the job above gives, with a second symptom. On the
+    # AVX-512 masked EPYC draws vLLM's CPU backend also cannot build its
+    # oneDNN matmul primitives and falls back to plain torch, which the
+    # text-only oracle survives and this slice does not: measured on one
+    # x86 run, the single draw without the fallback finished `init engine`
+    # in 49s and passed, while the three with it took 623s, died in encoder
+    # profiling, or never finished it inside 900s.
+    runs-on: ubuntu-24.04-arm
+    # Roughly twice the measured 25 min (4m36s of setup, then per release a
+    # vision-language pass of about 7 min and a speech pass of about 3), so a
+    # server that hangs rather than fails stops holding the gate.
+    timeout-minutes: 60
+    env:
+      # Which models play which oracle is decided in the test module
+      # (VLM_MODEL / AUDIO_MODEL); these must match it, since this job
+      # starts the containers and the tests only connect to them.
+      VLM_MODEL: OpenGVLab/InternVL3-1B-hf
+      AUDIO_MODEL: ibm-granite/granite-4.0-1b-speech
+      # Media on a CPU VLM needs more context than the 2048 the text-only
+      # oracle serves with; 4096 is both models' max_position_embeddings.
+      # Matches MAX_MODEL_LEN in the test module.
+      VLLM_MAX_MODEL_LEN: "4096"
+      # Every multimodal model needs its own chat template (the text-only
+      # template would drop the media placeholders).
+      VLLM_CHAT_TEMPLATE: ""
+      # These models profile one encoder item of the maximum feature size
+      # before they serve (a video for the VLM, an audio clip for the speech
+      # model), which the text-only oracle has no equivalent of. Measured
+      # startups here are 93-132s against the 300s default, so this is not
+      # for the profiling pass itself: it is headroom for a slow Hugging
+      # Face, which serves 6.5GB of weights across the two models and took
+      # 15-31s per model on the runs measured so far.
+      VLLM_HEALTH_TIMEOUT_SEC: "600"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Same contract as the job above: the release table lives with the
+      # tests, and an empty table fails here rather than passing a
+      # zero-iteration loop below. A separate table because this slice's
+      # floor is higher (see the file's header) and its pins carry no
+      # metric-families goldens. VLLM_HF_CACHE points the four servers at one
+      # directory so the second release reuses the first one's download.
+      - name: Load vLLM version table
+        run: |
+          versions="$(grep -vE '^[[:space:]]*(#|$)' e2e/vllm_multimodal_releases.txt | xargs)"
+          [ -n "$versions" ]
+          echo "VLLM_VERSIONS=$versions" >> "$GITHUB_ENV"
+          echo "VLLM_HF_CACHE=$HOME/hf-cache" >> "$GITHUB_ENV"
+
+      # No weights cache here, unlike the job above. Both releases share one
+      # download inside the job, which the green run measured at 14s for the
+      # VLM and 29s for the speech model, 43s of a 25 minute job. Caching it
+      # would put a ~6GB entry into a 10GB repo-wide budget and evict the nix
+      # and venv caches below, which save most of the 4m36s of `pdm sync`
+      # that is the part of this job actually worth caching.
+      - name: Prefetch vLLM images
+        run: |
+          for v in $VLLM_VERSIONS; do
+            docker pull "docker.io/vllm/vllm-openai-cpu:$v" > /dev/null 2>&1 &
+          done
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@4eae8bea4afaa8f8ea8aa638ab9a7fead2f3d21e # v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same two caches as the job above, under the same keys: this job
+      # runs on the same runner image with the same flake and pdm.lock, so
+      # it restores whatever that job or an earlier run saved.
+      - name: Restore and save Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
+      - name: Restore pdm venv
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .venv
+          key: venv-nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'pdm.lock') }}
+
+      # Kept on cache hits for the reason the job above gives.
+      - name: Install dependencies
+        run: |
+          nix develop -c pdm sync -d
+
+      # For every release: start the vision-language server, run the image
+      # and video cases, stop it; start the speech server, run the audio
+      # case, stop it. A pass that skips anything fails, because a case that
+      # skips against the server meant to serve it means the server is not
+      # what this job thinks it is (wrong model, or the modality table in
+      # e2e/utils/vllm_server.py drifted), and a gate whose oracle silently
+      # skips gates nothing. Every release runs even after one fails.
+      - name: Run multimodal e2e tests per vLLM version
+        run: |
+          set -uo pipefail
+          failed=""
+          ran=0
+
+          # run_pass <version> <model> <modalities> <pytest -k expression>
+          run_pass() {
+            local v="$1" model="$2" modalities="$3" select="$4"
+            local tag="${model##*/}-$v"
+            local out="test_multimodal_e2e-$tag.out"
+            if VLLM_MODEL="$model" e2e/vllm_cpu_server.sh start "$v"; then
+              local resolved reason
+              resolved="$(.venv/bin/python e2e/known_bad.py version http://127.0.0.1:8000 || echo unknown)"
+              {
+                echo "### $model on $v resolved to"
+                echo '```'
+                echo "$resolved"
+                docker inspect --format '{{index .RepoDigests 0}}' \
+                  "docker.io/vllm/vllm-openai-cpu:$v" || true
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+
+              # Known-bad releases are skipped the way the job above does it.
+              if ! reason="$(.venv/bin/python e2e/known_bad.py skip-reason "$v" "$resolved")"; then
+                echo "::error::$tag: e2e/known_bad.py skip-reason failed, see the log"
+                failed="$failed $tag"
+              elif [ -n "$reason" ]; then
+                echo "::warning::$tag resolved to $resolved, skipped: $reason"
+                echo "skipped: $reason" >> "$GITHUB_STEP_SUMMARY"
+              else
+                ran=$((ran + 1))
+                if E2E_VLLM_BASE_URL=http://127.0.0.1:8000 E2E_VLLM_MODALITIES="$modalities" \
+                  nix develop -c pdm run test:e2e:multimodal -k "$select" -rs -o log_cli_level=DEBUG \
+                  |& tee "$out"; then
+                  if grep -qE '[0-9]+ skipped' "$out"; then
+                    echo "::error::$tag: pass selected '$select' but skipped cases (see $out)"
+                    failed="$failed $tag"
+                  fi
+                else
+                  failed="$failed $tag"
+                fi
+              fi
+            else
+              failed="$failed $tag"
+            fi
+            e2e/vllm_cpu_server.sh logs > "vllm_server-$tag.log" 2>&1 || true
+            e2e/vllm_cpu_server.sh stop > /dev/null 2>&1 || true
+          }
+
+          for v in $VLLM_VERSIONS; do
+            run_pass "$v" "$VLM_MODEL" "image,video" "not audio"
+            run_pass "$v" "$AUDIO_MODEL" "audio" "audio"
+          done
+
+          if [ -n "$failed" ]; then
+            echo "::error::multimodal slice failed for:$failed"
+            exit 1
+          fi
+          # Same rule as the job above: every pass skipped tests nothing.
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::every pass in e2e/vllm_multimodal_releases.txt was skipped as known-bad"
+            exit 1
+          fi
+
+      - name: Upload e2e outputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test_e2e_multimodal
+          path: |
+            test_multimodal_e2e-*.out
+            vllm_server-*.log

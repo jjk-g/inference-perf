@@ -3,7 +3,9 @@
 [![PyPI Release](https://img.shields.io/pypi/v/inference-perf.svg?label=PyPI%20Release)](https://pypi.python.org/pypi/inference-perf)
 [![Container Image](https://img.shields.io/badge/Container-latest-blue)](https://quay.io/inference-perf/inference-perf)
 [![Tests](https://img.shields.io/github/actions/workflow/status/kubernetes-sigs/inference-perf/unit_test.yml?branch=main&label=Tests)](https://github.com/kubernetes-sigs/inference-perf/actions/workflows/unit_test.yml)
+[![Coverage Status](https://coveralls.io/repos/github/kubernetes-sigs/inference-perf/badge.svg?branch=main)](https://coveralls.io/github/kubernetes-sigs/inference-perf?branch=main)
 [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://kubernetes.slack.com/?redir=%2Fmessages%2Finference-perf)
+[![DOI](https://joss.theoj.org/papers/10.21105/joss.10314/status.svg)](https://doi.org/10.21105/joss.10314)
 
 # Inference Perf
 
@@ -28,9 +30,10 @@ It was founded as a part of the inference benchmarking and metrics standardizati
 - **Automatic Visualization**: Generate charts for QPS vs Latency/Throughput/Goodput. See [analysis.md](./docs/analysis.md).
 
 ### 🧠 Smart Data Generation
-- **Real-world Datasets**: Support for ShareGPT, CNN DailyMail, Infinity Instruct and Billsum.
+- **Real-world Datasets**: Support for ShareGPT, CNN DailyMail, Infinity Instruct, Billsum, and the VisionArena image dataset.
 - **Synthetic & Random**: Configure exact input/output distributions.
 - **Advanced Scenarios**: Shared prefix and multi-turn chat conversations.
+- **Multimodal**: Synthetic image, video, and audio payloads with per-modality reporting. Resolutions/profiles/durations are passed through as-is; pick values within your model's accepted range. See [docs/config.md](docs/config.md#multimodal-data-generation).
 
 ### ⏱️ Flexible Load Generation
 - **Load Patterns**: Constant rate, Poisson arrival, and concurrent user simulation.
@@ -88,15 +91,23 @@ Explore detailed documentation for specific topics:
 | Topic | Description | Link |
 | :--- | :--- | :--- |
 | **Configuration** | Full YAML configuration schema and options. | [config.md](./docs/config.md) |
-| **CLI Flags** | Overriding configuration via command line flags. | [cli_flags.md](./docs/cli_flags.md) |
+| **CLI Flags** | All command line flags: global options and configuration overrides. | [cli_flags.md](./docs/cli_flags.md) |
 | **Load Generation** | Detailed explanation of load patterns and multi-worker setup. | [loadgen.md](./docs/loadgen.md) |
-| **Metrics** | Definitions of TTFT, TPOT, ITL, etc. | [metrics.md](./docs/metrics.md) |
+| **Collected Metrics** | Definitions of TTFT, TPOT, ITL, etc. | [metrics.md](./docs/metrics.md) |
+| **Emitted Metrics** | Prometheus metrics inference-perf exports about its own runtime. | [runtime_metrics.md](./docs/runtime_metrics.md) |
+| **Comparability** | Configuring runs that are comparable with other benchmarking tools. | [comparability.md](./docs/comparability.md) |
 | **Goodput** | How to measure requests meeting SLOs. | [goodput.md](./docs/goodput.md) |
 | **Reports** | Understanding generated JSON reports. | [reports.md](./docs/reports.md) |
 | **OTel Observability** | Instrument benchmark runs with OpenTelemetry tracing to export to Jaeger, Tempo, etc. | [otel_instrumentation.md](./docs/otel_instrumentation.md) |
 | **OTel Trace Replay** | Data/load type for replaying production traces with complex dependency graphs. | [otel_trace_replay.md](./docs/otel_trace_replay.md) |
+| **Synthetic Agentic** | Data/load type for generating agentic workloads (tool loops, sub-agent fan-out, context growth) procedurally, without a recorded trace. | [synthetic_agentic.md](./docs/synthetic_agentic.md) |
+| **Weka Trace Replay** | Data/load type for replaying raw Weka agent traces via graph-based session execution. | [weka_trace_replay.md](./docs/weka_trace_replay.md) |
 | **Conversation Replay** | Data/load type for benchmarking concurrent multi-turn agentic conversations with configurable distributions. | [conversation_replay.md](./docs/conversation_replay.md) |
+| **BR0.2 Reports** | Always-emitted llm-d-benchmark BR0.2 partial per stage; designed for clean yq-merge with other producers. | [br_v0_2.md](./docs/br_v0_2.md) |
 | **Analysis** | Visualizations and plots for performance metrics. | [analysis.md](./docs/analysis.md) |
+| **Troubleshooting** | Diagnosing anomalous results: measurement bugs vs workload mistakes vs real system behavior. | [troubleshooting.md](./docs/troubleshooting.md) |
+| **E2E Tests** | Contributor guide to the end-to-end test tier: running and extending it. | [e2e_tests.md](./docs/e2e_tests.md) |
+| **Mutation Testing** | Contributor guide to the advisory mutation ratchet: what it checks and what each failure means. | [mutation_testing.md](./docs/mutation_testing.md) |
 
 ---
 
@@ -104,7 +115,7 @@ Explore detailed documentation for specific topics:
 
 We welcome contributions! Please join us:
 
-- **Slack**: [#inference-perf](https://kubernetes.slack.com/?redir=%2Fmessages%2Finference-perf) channel in Kubernetes workspace.
+- **Slack**: [#inference-perf](https://kubernetes.slack.com/?redir=%2Fmessages%2Finference-perf) channel in [Kubernetes workspace](https://slack.k8s.io/).
 - **Community Meeting**: Weekly on Thursdays alternating between 09:00 and 11:30 PDT.
 - **Code of Conduct**: Governed by the [Kubernetes Code of Conduct](code-of-conduct.md).
 

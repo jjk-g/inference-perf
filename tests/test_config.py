@@ -11,13 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from pydantic import ValidationError
 from inference_perf.config import (
     APIType,
     Config,
+    DataConfig,
     DataGenType,
     Distribution,
     DistributionType,
     LoadType,
+    VideoProfile,
     MetricsClientType,
     deep_merge,
     read_config,
@@ -68,6 +71,19 @@ def test_deep_merge() -> None:
     assert merged["load"]["type"] == LoadType.POISSON
     assert merged["metrics"]["type"] == MetricsClientType.PROMETHEUS
     assert merged["metrics"]["type"] == MetricsClientType.PROMETHEUS
+
+
+def test_read_config_accepts_anthropic_messages_api_type() -> None:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
+        yaml.dump({"api": {"type": "anthropic_messages"}}, tmp)
+        tmp_path = tmp.name
+
+    try:
+        config = read_config(tmp_path)
+        assert config.api.type == APIType.AnthropicMessages
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def test_read_config_timestamp_substitution() -> None:
@@ -328,6 +344,50 @@ def test_shared_prefix_seed_field() -> None:
     assert config.data.shared_prefix.seed == 42
 
 
+def test_use_chat_template_rejected_for_non_random_types() -> None:
+    with pytest.raises(Exception, match="only supported by the 'random' data generator"):
+        Config.model_validate(
+            {
+                "data": {
+                    "type": DataGenType.ShareGPT,
+                    "use_chat_template": True,
+                }
+            }
+        )
+
+
+def test_use_chat_template_accepted_for_random_type() -> None:
+    config = Config.model_validate(
+        {
+            "data": {
+                "type": DataGenType.Random,
+                "use_chat_template": True,
+            }
+        }
+    )
+    assert config.data.use_chat_template is True
+
+
+def test_synthetic_agentic_type_requires_synthetic_agentic_config() -> None:
+    with pytest.raises(ValidationError, match="requires 'data.synthetic_agentic' to be configured"):
+        DataConfig.model_validate({"type": DataGenType.SyntheticAgentic})
+
+
+def test_synthetic_agentic_type_accepted_with_synthetic_agentic_config() -> None:
+    data = DataConfig.model_validate(
+        {
+            "type": DataGenType.SyntheticAgentic,
+            "synthetic_agentic": {
+                "num_sessions": 10,
+                "input_tokens_per_turn": {"type": "fixed", "mean": 500},
+                "output_tokens_per_turn": {"type": "fixed", "mean": 100},
+            },
+        }
+    )
+    assert data.synthetic_agentic is not None
+    assert data.synthetic_agentic.num_sessions == 10
+
+
 def test_distribution_variance_conversion() -> None:
     d = Distribution(type=DistributionType.NORMAL, mean=100.0, variance=6400.0, std_dev=0.0)
     assert abs(d.std_dev - 80.0) < 1e-6
@@ -387,6 +447,45 @@ def test_goodput_config_parsing() -> None:
         assert config.report.goodput is not None
         assert config.report.goodput.constraints["ttft"] == 0.5
         assert config.report.goodput.constraints["tpot"] == 0.1
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def test_multimodal_config_parsing() -> None:
+    config_content = {
+        "data": {
+            "type": "synthetic",
+            "multimodal": {
+                "image": {
+                    "count": {"type": "uniform", "min": 3, "max": 3, "mean": 3},
+                    "insertion_point": 0.5,
+                },
+                "video": {
+                    "count": {"type": "uniform", "min": 1, "max": 1, "mean": 1},
+                    "profiles": {"resolution": "1080p", "frames": 30},
+                },
+            },
+        }
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
+        yaml.dump(config_content, tmp)
+        tmp_path = tmp.name
+
+    try:
+        config = read_config(tmp_path)
+        assert config.data.multimodal is not None
+        assert config.data.multimodal.image is not None
+        assert config.data.multimodal.image.insertion_point == 0.5
+        assert config.data.multimodal.image.count is not None
+        assert config.data.multimodal.image.count.mean == 3
+        assert config.data.multimodal.video is not None
+        assert config.data.multimodal.video.count is not None
+        assert config.data.multimodal.video.count.mean == 1
+        assert config.data.multimodal.video.profiles is not None
+        assert isinstance(config.data.multimodal.video.profiles, VideoProfile)
+        assert config.data.multimodal.video.profiles.resolution == "1080p"
+        assert config.data.multimodal.video.profiles.frames == 30
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)

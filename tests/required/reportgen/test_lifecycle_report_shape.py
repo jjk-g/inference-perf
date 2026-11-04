@@ -1,0 +1,279 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Asserts the full lifecycle-metrics report shape, exercising every field
+that should be populated when a mix of multimodal requests is observed."""
+
+import typing
+
+from inference_perf.payloads import (
+    Image,
+    Video,
+    Audio,
+)
+from inference_perf.reportgen.base import summarize_requests
+from lifecycle_fixtures import failed_metric, mock_metric, retry_metric
+
+
+def _assert_summary(d: typing.Any) -> None:
+    """Every summary dict should carry mean/min/median/max."""
+    assert isinstance(d, dict), d
+    for k in ("mean", "min", "median", "max"):
+        assert k in d, f"missing {k} in {d}"
+        assert d[k] is not None
+
+
+def test_lifecycle_report_shape_populated() -> None:
+    # Three successful requests covering all modalities.
+    metrics = [
+        mock_metric(
+            start_time=0.0,
+            end_time=0.5,
+            scheduled_time=-0.001,
+            input_tokens=200,
+            output_tokens=60,
+            request_data="a" * 50000,
+            images=[
+                Image(pixels=1920 * 1080, bytes=50000, aspect_ratio=16 / 9),
+                Image(pixels=1280 * 720, bytes=30000, aspect_ratio=16 / 9),
+            ],
+            videos=[Video(pixels=1920 * 1080, bytes=1_300_000, aspect_ratio=16 / 9, frames=32)],
+            audios=[Audio(bytes=60000, seconds=15)],
+            output_token_times=[0.03, 0.2, 0.4, 0.5],
+        ),
+        mock_metric(
+            start_time=1.0,
+            end_time=1.49,
+            scheduled_time=0.999,
+            input_tokens=205,
+            output_tokens=64,
+            request_data="b" * 180000,
+            images=[Image(pixels=1024 * 1024, bytes=40000, aspect_ratio=1.0)],
+            videos=[],
+            audios=[Audio(bytes=90000, seconds=25)],
+            output_token_times=[1.03, 1.2, 1.4, 1.49],
+        ),
+        mock_metric(
+            start_time=2.0,
+            end_time=2.48,
+            scheduled_time=2.001,
+            input_tokens=196,
+            output_tokens=36,
+            request_data="c" * 1_800_000,
+            images=[
+                Image(pixels=3840 * 2160, bytes=110000, aspect_ratio=16 / 9),
+                Image(pixels=1920 * 1080, bytes=60000, aspect_ratio=16 / 9),
+                Image(pixels=800 * 600, bytes=22000, aspect_ratio=4 / 3),
+            ],
+            videos=[
+                Video(pixels=3840 * 2160, bytes=3_000_000, aspect_ratio=16 / 9, frames=64),
+                Video(pixels=960 * 720, bytes=500_000, aspect_ratio=4 / 3, frames=16),
+            ],
+            audios=[],
+            output_token_times=[2.04, 2.2, 2.4, 2.48],
+        ),
+    ]
+
+    summary = summarize_requests(
+        typing.cast(typing.Any, metrics),
+        percentiles=[50],
+        stage_rate=1.0,
+    )
+    report = summary.model_dump()
+
+    # Top-level
+    assert set(report.keys()) >= {"benchmark_time_seconds", "load_summary", "successes", "failures"}
+    assert report["benchmark_time_seconds"] > 0
+
+    # load_summary
+    load = report["load_summary"]
+    assert load["count"] == 3
+    _assert_summary(load["schedule_delay"])
+    assert load["send_duration"] > 0
+    assert load["requested_rate"] == 1.0
+    assert load["achieved_rate"] > 0
+
+    # successes
+    s = report["successes"]
+    assert s["count"] == 3
+
+    # latency
+    _assert_summary(s["latency"]["request_latency"])
+    _assert_summary(s["latency"]["time_to_first_token"])
+
+    # throughput
+    t = s["throughput"]
+    for k in (
+        "requests_per_sec",
+        "input_tokens_per_sec",
+        "output_tokens_per_sec",
+        "total_tokens_per_sec",
+        "images_per_sec",
+        "videos_per_sec",
+        "audios_per_sec",
+    ):
+        assert k in t, f"missing throughput key {k}"
+        assert t[k] > 0, f"expected {k} > 0"
+
+    # request_size_bytes, prompt_tokens, output_len
+    _assert_summary(s["request_size_bytes"])
+    _assert_summary(s["prompt_tokens"])
+    _assert_summary(s["output_len"])
+
+    # image nested
+    img = s["image"]
+    for k in ("count", "pixels", "bytes", "aspect_ratio"):
+        _assert_summary(img[k])
+
+    # video nested
+    vid = s["video"]
+    for k in ("count", "frames", "pixels", "bytes", "aspect_ratio"):
+        _assert_summary(vid[k])
+
+    # audio nested
+    aud = s["audio"]
+    for k in ("count", "seconds", "bytes"):
+        _assert_summary(aud[k])
+
+    # failures
+    f = report["failures"]
+    assert f["count"] == 0
+    assert f["request_latency"] is None
+    assert f["prompt_tokens"] == {"total": 0.0, "cached": 0.0, "uncached": 0.0}
+
+
+def test_lifecycle_report_shape_with_failures() -> None:
+    success = mock_metric(
+        start_time=0.0,
+        end_time=0.5,
+        scheduled_time=0.0,
+        input_tokens=100,
+        output_tokens=50,
+        request_data="ok",
+        images=[Image(pixels=100, bytes=1000, aspect_ratio=1.0)],
+        videos=[Video(pixels=100, bytes=1000, aspect_ratio=1.0, frames=8)],
+        audios=[Audio(bytes=500, seconds=3)],
+        output_token_times=[0.1, 0.3, 0.5],
+    )
+
+    failure = failed_metric(start_time=1.0, end_time=1.2, scheduled_time=1.0, input_tokens=80)
+
+    summary = summarize_requests(typing.cast(typing.Any, [success, failure]), percentiles=[50])
+    report = summary.model_dump()
+
+    assert report["successes"]["count"] == 1
+    assert report["failures"]["count"] == 1
+    _assert_summary(report["failures"]["request_latency"])
+    _assert_summary(report["failures"]["prompt_tokens"])
+    assert report["failures"]["by_label"]["500 - Internal Server Error"]["count"] == 1
+
+
+# --- Retry reporting (#777) ---
+
+
+def test_retries_absent_when_nothing_retried() -> None:
+    """A run with retries off must carry no retry section at all -- not a block of zeros
+    implying the mechanism was exercised, and not a `"retries": null` either.
+
+    The serialized shape is the load-bearing half: a default-config report must be
+    byte-identical to one produced before retries existed, or every downstream consumer
+    sees a schema change from a feature nobody enabled.
+    """
+    summary = summarize_requests(typing.cast(typing.Any, [retry_metric(0, False)]), percentiles=[50])
+    assert summary.retries is None
+    assert "retries" not in summary.model_dump()
+
+
+def test_retries_partition_recovered_and_failed() -> None:
+    """attempts counts POSTs, requests_retried counts requests, and recovered +
+    failed_after_retry must partition requests_retried exactly.
+
+    `failed_after_retry`, not `exhausted`: a retried request also lands here when a retry
+    reached the endpoint and came back with a non-retryable failure, which stops the loop
+    with attempts still in the budget."""
+    metrics = [
+        retry_metric(0, False),  # never retried -> excluded entirely
+        retry_metric(1, True),  # retried once, recovered
+        retry_metric(2, True),  # retried twice, recovered
+        retry_metric(2, False),  # retried twice, still failed
+    ]
+    summary = summarize_requests(typing.cast(typing.Any, metrics), percentiles=[50])
+    assert summary.retries is not None
+    assert summary.retries["requests_retried"] == 3
+    assert summary.retries["attempts"] == 5
+    assert summary.retries["recovered"] == 2
+    assert summary.retries["failed_after_retry"] == 1
+    assert summary.retries["recovered"] + summary.retries["failed_after_retry"] == summary.retries["requests_retried"]
+
+
+def test_retries_are_not_counted_as_errors() -> None:
+    """A retry is not an error label: a recovered retry must leave failures untouched,
+    or the run's error rate would double-count faults the retry already absorbed."""
+    summary = summarize_requests(typing.cast(typing.Any, [retry_metric(2, True)]), percentiles=[50])
+    assert summary.failures["count"] == 0
+    assert summary.failures["by_label"] == {}
+    assert summary.successes["count"] == 1
+
+
+def test_retries_report_wasted_time() -> None:
+    """The window's retry cost is reported as wasted wall time -- the number a reader of
+    this block actually wants -- alongside the counters.
+
+    Reported as waste rather than as a competing latency because every latency in the report
+    already counts retry time: start_time stays at dispatch.
+    """
+    metrics = [
+        retry_metric(0, False),  # never retried -> contributes nothing
+        retry_metric(1, True, retry_wasted_sec=2.0),
+        retry_metric(1, True, retry_wasted_sec=4.0),
+    ]
+    summary = summarize_requests(typing.cast(typing.Any, metrics), percentiles=[50])
+    assert summary.retries is not None
+    assert summary.retries["wasted_sec_total"] == 6.0
+    wasted = summary.retries["wasted_sec"]
+    # Distributed over the two retried requests, not all three: a third entry for the
+    # never-retried request would drag the mean to 2.0.
+    assert wasted["mean"] == 3.0
+    assert wasted["min"] == 2.0
+    assert wasted["max"] == 4.0
+
+
+def test_retries_count_failed_requests_as_wasted() -> None:
+    """A request that retried and failed anyway wasted ALL of its time, so it is counted --
+    it is the most expensive waste in a run, not an exclusion.
+
+    This is the opposite of a latency statistic, where a failed attempt's duration would be
+    meaningless. Waste is waste regardless of how the request ended.
+    """
+    metrics = [
+        retry_metric(2, True, retry_wasted_sec=5.0),  # recovered
+        retry_metric(2, False, retry_wasted_sec=95.0),  # never succeeded -- still wasted
+    ]
+    summary = summarize_requests(typing.cast(typing.Any, metrics), percentiles=[50])
+    assert summary.retries is not None
+    assert summary.retries["failed_after_retry"] == 1
+    assert summary.retries["wasted_sec_total"] == 100.0, "failed request's waste was dropped"
+    assert summary.retries["wasted_sec"]["max"] == 95.0
+
+
+def test_retries_report_waste_when_nothing_recovered() -> None:
+    """Attempts spent with no recovery still report their waste: a run where every retry
+    failed has paid the full cost for nothing, which the block must show rather than omit.
+    """
+    summary = summarize_requests(
+        typing.cast(typing.Any, [retry_metric(2, False, retry_wasted_sec=7.0)]),
+        percentiles=[50],
+    )
+    assert summary.retries is not None
+    assert summary.retries["recovered"] == 0
+    assert summary.retries["wasted_sec_total"] == 7.0

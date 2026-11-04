@@ -1,0 +1,2277 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Shared graph-backed SessionGenerator runtime.
+
+This module contains the session replay runtime that is agnostic to how a
+ReplayGraph was produced. Concrete generators are responsible for producing
+ReplaySession objects; this base class handles session lifecycle, worker
+affinity, lazy request materialization, and session completion tracking.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import io
+import json
+import logging
+import re
+import time
+import uuid
+from collections import Counter
+from dataclasses import dataclass, field, replace as dc_replace
+from enum import Enum
+from multiprocessing.managers import SyncManager
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from aiohttp import ClientResponse
+from PIL import Image as PILImage
+
+from inference_perf.apis import (
+    ChatCompletionAPIData,
+    ErrorResponseInfo,
+    InferenceAPIData,
+    InferenceInfo,
+    LazyLoadInferenceAPIData,
+    SessionLifecycleMetric,
+    StreamedResponseMetrics,
+    UnaryResponseMetrics,
+)
+from inference_perf.apis.anthropic_messages import (
+    build_anthropic_request_body,
+    count_anthropic_output_tokens,
+    count_anthropic_prompt_tokens,
+    parse_anthropic_content,
+    parse_anthropic_stream_response,
+    parse_anthropic_thinking,
+)
+from inference_perf.apis.chat import ChatMessage, reasoning_field
+from inference_perf.apis.image_parts import base64_size, image_bytes, is_image_part, to_otel_part
+from inference_perf.payloads import Image, Images, RequestMetrics, Text
+from inference_perf.apis.streaming_parser import parse_sse_stream
+from inference_perf.config import APIConfig, APIType, DataConfig, SessionReplayConfig
+from inference_perf.config.datagen.replay import BadToolCallHandling, ToolChoiceMode
+from inference_perf.datagen.base import LazyLoadDataMixin, SessionGenerator
+from inference_perf.datagen.replay.replay_graph_types import InputSegment, ReplayGraph
+from inference_perf.utils.custom_tokenizer import CustomTokenizer
+
+logger = logging.getLogger(__name__)
+
+
+def replayed_images(messages: List[ChatMessage]) -> Optional[Images]:
+    """Per-image metrics for the images in a replayed request's messages.
+
+    Every image is counted; only those whose size is known (inline bytes with a readable
+    header) are listed as instances, so an image sent by URL does not skew the pixel and
+    byte distributions. Returns None for a request without images, matching how synthetic
+    requests leave it unset.
+    """
+    count = 0
+    instances: List[Image] = []
+    for message in messages:
+        for part in message.content if isinstance(message.content, list) else []:
+            if not is_image_part(part):
+                continue
+            image = to_otel_part(part)
+            data = image_bytes(image)
+            if data is None and not image.get("uri"):
+                continue
+            count += 1
+            width, height = _image_dimensions(data) if data is not None else (0, 0)
+            if width and height and data is not None:
+                instances.append(Image(pixels=width * height, bytes=base64_size(data), aspect_ratio=width / height))
+    return Images(count=count, instances=instances) if count else None
+
+
+def _image_dimensions(data: str) -> Tuple[int, int]:
+    """Width and height from the image header: the first 48 KiB usually hold it, else the whole image."""
+    for chunk in dict.fromkeys((data[: 64 * 1024], data)):
+        try:
+            with PILImage.open(io.BytesIO(base64.b64decode(chunk))) as img:
+                return img.size
+        except (OSError, ValueError, PILImage.DecompressionBombError):
+            continue
+    return 0, 0
+
+
+def _expand_tool_call_max_tokens(recorded_tokens: int) -> int:
+    """Add bounded headroom for replaying a recorded tool call.
+
+    Small structured outputs need a generous floor because tool-call wrappers and
+    tokenizer differences can dominate their size.  Applying the same 4x factor
+    to already-large calls needlessly consumes the model's context window, so the
+    expansion becomes progressively less aggressive as the recording grows.
+    """
+    if recorded_tokens <= 1_024:
+        return max(recorded_tokens * 4, 4_096)
+    if recorded_tokens <= 8_192:
+        return max((recorded_tokens * 3 + 1) // 2, 8_192)
+    return recorded_tokens + 4_096
+
+
+class SessionReplayLazyLoadData(LazyLoadInferenceAPIData):
+    """LazyLoadInferenceAPIData extended with per-session addressing for OTel trace replay.
+
+    Instead of a global data_index into all_events, the worker identifies the
+    request by (session_index, local_event_index) so it can build only the
+    requested session's graph on demand without materializing all sessions upfront.
+    """
+
+    data_index: int = -1
+    session_index: int
+    local_event_index: int
+
+
+# --- bad_tool_call_handling ------------------------------------------------
+# Server-side tool-call parsers can emit malformed JSON in
+# tool_calls[i].function.arguments — for example vLLM's `qwen3_xml` parser
+# leaks closing XML markers (`</parameter></function>`) into the JSON string
+# value at decode time. vLLM still returns 200 on the response, but on the
+# *next* turn the chat template's `json.loads(arguments)` raises and vLLM
+# returns HTTP 400. Replaying the bad bytes verbatim therefore halts the
+# session.
+#
+# This mitigation lives ENTIRELY in the substitution path
+# (`_build_messages_with_substitution`). The response path is byte-identical
+# to upstream main: it stores the raw tool_calls in the registry exactly as
+# the model emitted them. At substitution time, when a downstream event
+# pulls a predecessor's stored message, we run `_detect_bad_tool_calls` on
+# its `tool_calls` and, if `bad_tool_call_handling=use_recorded`, substitute
+# the recorded assistant message at this slot.
+#
+# Gated per-event by the `bad_tool_call_handling` field on the OTel replay
+# config. When the value is `none` (the default), the inline detection is
+# short-circuited and behavior is identical to upstream main.
+
+
+# Envelope for an async sub-agent notification (`async_report` segments).
+#
+# A real async harness does not hand the orchestrator a bare string: the child's
+# report arrives wrapped in a `<task-notification>` block whose `<result>` holds
+# the report body. We reproduce the RESULT wrapper only.
+#
+# Applied at REPLAY time (not graph-build) because the body is the child's live
+# generated text. Adds a small fixed number of tokens to the notification turn's
+# input relative to the recorded placeholder.
+ASYNC_NOTIFICATION_OPEN = "<task-notification>\n<result>\n"
+ASYNC_NOTIFICATION_CLOSE = "\n</result>\n</task-notification>"
+
+
+def _wrap_async_notification(report_text: str) -> str:
+    """Wrap a child sub-agent's live report in the `<task-notification>` envelope."""
+    return f"{ASYNC_NOTIFICATION_OPEN}{report_text}{ASYNC_NOTIFICATION_CLOSE}"
+
+
+def _detect_bad_tool_calls(
+    tool_calls: Optional[List[Dict[str, Any]]],
+) -> List[Tuple[int, str, str]]:
+    """Return [(index, function_name, json_error)] for tool_calls whose
+    `arguments` field is a string that fails json.loads(). Empty list = ok."""
+    bad: List[Tuple[int, str, str]] = []
+    if not tool_calls:
+        return bad
+    for i, tc in enumerate(tool_calls):
+        fn = tc.get("function") or {}
+        args = fn.get("arguments", "")
+        if not isinstance(args, str):
+            continue
+        try:
+            json.loads(args)
+        except json.JSONDecodeError as e:
+            bad.append((i, fn.get("name", "?"), str(e)))
+    return bad
+
+
+# --- end bad_tool_call_handling --------------------------------------------
+
+
+class SessionFailureCause(str, Enum):
+    """Stable cause code for a session replay failure.
+
+    Carried as ``error_type`` on ``SessionLifecycleMetric.error`` and used as the
+    bucket key for the session-level ``failures.by_label`` report. The prose that
+    accompanies a failure goes in ``error_msg`` and is free to embed per-event
+    ids; bucketing on this code rather than on that prose is what keeps a cause
+    like RECORDED_FALLBACK_MALFORMED from producing one singleton bucket per
+    failure. These values are report surface: renaming one changes user-visible
+    output.
+    """
+
+    SESSION_ALREADY_FAILED = "session_already_failed"
+    PREDECESSOR_FAILED = "predecessor_failed"
+    PREDECESSOR_WAIT_FAILED = "predecessor_wait_failed"
+    RECORDED_FALLBACK_MALFORMED = "recorded_fallback_malformed"
+    SUBSTITUTION_TOOL_CALL_EXPECTED = "substitution_tool_call_expected"
+    REQUEST_FAILED = "request_failed"
+    UNKNOWN = "unknown"
+
+
+class EventFailedError(Exception):
+    """Raised by EventOutputRegistry.require_async when the awaited event failed."""
+
+    def __init__(self, event_id: str) -> None:
+        super().__init__(f"Predecessor event {event_id!r} failed")
+        self.event_id = event_id
+
+
+class SessionInferenceInfo(InferenceInfo):
+    """InferenceInfo subclass that also carries the raw output text."""
+
+    output_text: Optional[str] = None
+    output_message: Optional[Dict[str, Any]] = None
+
+    def __init__(
+        self,
+        *,
+        request_metrics: Optional[RequestMetrics] = None,
+        input_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
+        if request_metrics is None:
+            request_metrics = RequestMetrics(text=Text(input_tokens=input_tokens or 0))
+            if "response_metrics" not in kwargs:
+                kwargs["response_metrics"] = UnaryResponseMetrics(output_tokens=output_tokens or 0)
+        super().__init__(request_metrics=request_metrics, **kwargs)
+
+
+class WorkerSessionTracker:
+    """Per-worker tracking of event completions and session failures."""
+
+    def __init__(self) -> None:
+        self._event_completions: Dict[str, Dict[str, float]] = {}
+        self._failed_sessions: Set[str] = set()
+        # Per-session (cause_code, prose) for the FIRST failure observed. Later
+        # failures in the same session are consequences of that root cause
+        # (a failed event cascades to every successor), so first-write-wins is
+        # what keeps the reported cause pointing at the thing that actually
+        # broke rather than at the cascade.
+        self._session_failures: Dict[str, Tuple[str, str]] = {}
+        # Per-session set of predecessor event_ids whose live tool_call
+        # response was detected malformed at substitution time and replaced
+        # with the recorded assistant message. Empty when
+        # bad_tool_call_handling is `none`. Stored as a set so a
+        # predecessor with multiple downstream consumers (DAG fan-out) is
+        # counted once, not once per consumer.
+        self._recorded_substitution_event_ids: Dict[str, Set[str]] = {}
+        # Per-session set of event_ids that have reached a terminal state on this worker —
+        # whether they completed, were skipped, or failed. Used to detect when a session is
+        # fully drained so the worker can evict its (otherwise never-freed) built graph.
+        # A set (not a counter) makes drain accounting idempotent: an event that passes
+        # through more than one terminal path is counted at most once.
+        self._drained_events: Dict[str, Set[str]] = {}
+
+    def record_event_drained(self, session_id: str, event_id: str) -> int:
+        """Mark one event as drained (terminal) and return the session's drained count.
+
+        Called from every terminal path (completion, skip, request failure). Idempotent
+        per event_id. The caller compares the returned count against the session's total
+        event count to decide whether the session is fully drained and can be evicted.
+        """
+        drained = self._drained_events.setdefault(session_id, set())
+        drained.add(event_id)
+        return len(drained)
+
+    def forget_session(self, session_id: str) -> None:
+        """Drop all per-worker tracking for a session (called after eviction)."""
+        self._event_completions.pop(session_id, None)
+        self._failed_sessions.discard(session_id)
+        self._session_failures.pop(session_id, None)
+        self._drained_events.pop(session_id, None)
+        self._recorded_substitution_event_ids.pop(session_id, None)
+
+    def record_event_completed(self, session_id: str, event_id: str, completion_time: float) -> None:
+        if session_id not in self._event_completions:
+            self._event_completions[session_id] = {}
+        self._event_completions[session_id][event_id] = completion_time
+
+    def is_event_completed(self, session_id: str, event_id: str) -> bool:
+        return session_id in self._event_completions and event_id in self._event_completions[session_id]
+
+    def get_event_completion_time(self, session_id: str, event_id: str) -> Optional[float]:
+        return self._event_completions.get(session_id, {}).get(event_id)
+
+    def mark_session_failed(
+        self,
+        session_id: str,
+        cause: Optional[SessionFailureCause] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        self._failed_sessions.add(session_id)
+        if cause is not None and session_id not in self._session_failures:
+            self._session_failures[session_id] = (cause.value, reason or cause.value)
+
+    def is_session_failed(self, session_id: str) -> bool:
+        return session_id in self._failed_sessions
+
+    def get_session_failure(self, session_id: str) -> Optional[Tuple[str, str]]:
+        """Return (cause_code, prose) for a failed session, or None if unrecorded."""
+        return self._session_failures.get(session_id)
+
+    def get_session_event_count(self, session_id: str) -> int:
+        return len(self._event_completions.get(session_id, {}))
+
+    def get_session_completion_times(self, session_id: str) -> Dict[str, float]:
+        return self._event_completions.get(session_id, {}).copy()
+
+    def get_tracked_session_ids(self) -> List[str]:
+        """Sessions this worker has recorded at least one event completion for.
+
+        A session drops out of here once it is evicted, which happens after its last event
+        drains - so what is left are sessions still in flight on this worker.
+        """
+        return list(self._event_completions.keys())
+
+    def record_recorded_substitution(self, session_id: str, event_id: str) -> None:
+        """Tag a predecessor event_id whose live tool_call response was
+        replaced with the recorded message. Idempotent."""
+        self._recorded_substitution_event_ids.setdefault(session_id, set()).add(event_id)
+
+    def get_session_recorded_substitution_event_ids(self, session_id: str) -> List[str]:
+        # Sorted for deterministic test/log output.
+        return sorted(self._recorded_substitution_event_ids.get(session_id, set()))
+
+
+class EventOutputRegistry:
+    """Per-worker registry mapping event_id → actual output text and input messages."""
+
+    def __init__(self) -> None:
+        self._event_output_text: Dict[str, str] = {}
+        self._event_output_message: Dict[str, Dict[str, Any]] = {}
+        self._event_input_messages: Dict[str, Any] = {}
+        self._event_signals: Dict[str, asyncio.Event] = {}
+        self._failed_event_ids: Set[str] = set()
+
+    def record(
+        self,
+        event_id: str,
+        output_text: str,
+        messages: List[Any],
+        output_message: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if event_id in self._event_output_text:
+            raise ValueError(
+                f"Event {event_id} has already been recorded. "
+                f"Each event should only complete once. This indicates a bug in the replay logic."
+            )
+
+        self._event_output_text[event_id] = output_text
+        self._event_input_messages[event_id] = list(messages) if messages else []
+        if output_message is not None:
+            self._event_output_message[event_id] = output_message
+
+        if event_id in self._event_signals:
+            self._event_signals[event_id].set()
+            logger.debug(f"Set asyncio.Event signal for event {event_id}")
+
+    def get_output_by_event_id(self, event_id: str) -> Optional[str]:
+        return self._event_output_text.get(event_id)
+
+    def get_message_by_event_id(self, event_id: str) -> Optional[Dict[str, Any]]:
+        return self._event_output_message.get(event_id)
+
+    def get_messages_by_event_id(self, event_id: str) -> Optional[List[Any]]:
+        return self._event_input_messages.get(event_id)
+
+    def get_event_ids(self) -> List[str]:
+        return list(self._event_output_text.keys())
+
+    def record_failure(self, event_id: str) -> None:
+        self._failed_event_ids.add(event_id)
+        if event_id not in self._event_signals:
+            self._event_signals[event_id] = asyncio.Event()
+        self._event_signals[event_id].set()
+        logger.debug(f"Recorded failure for event {event_id}")
+
+    def is_event_failed(self, event_id: str) -> bool:
+        return event_id in self._failed_event_ids
+
+    async def require_async(self, event_id: str, timeout_sec: float = 3600.0) -> str:
+        # timeout_sec=0 waits indefinitely (see the asyncio.wait_for call below).
+        if event_id in self._failed_event_ids:
+            raise EventFailedError(event_id)
+
+        output = self._event_output_text.get(event_id)
+        if output is not None:
+            return output
+
+        if event_id not in self._event_signals:
+            self._event_signals[event_id] = asyncio.Event()
+        signal = self._event_signals[event_id]
+
+        if event_id in self._failed_event_ids:
+            raise EventFailedError(event_id)
+        output = self._event_output_text.get(event_id)
+        if output is not None:
+            return output
+
+        logger.debug(f"Event {event_id} waiting on asyncio signal (zero threads)")
+
+        try:
+            await asyncio.wait_for(signal.wait(), timeout=timeout_sec if timeout_sec > 0 else None)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"EventOutputRegistry: output for '{event_id}' not available after "
+                f"{timeout_sec:.1f}s. Check that the predecessor is not blocked or failed."
+            ) from e
+
+        if event_id in self._failed_event_ids:
+            raise EventFailedError(event_id)
+
+        output = self._event_output_text.get(event_id)
+        assert output is not None, (
+            f"asyncio signal fired for {event_id} but output missing from local cache — this is a bug in record()"
+        )
+        logger.debug(f"Event {event_id} woke from asyncio signal")
+        return output
+
+
+class SessionChatCompletionAPIData(ChatCompletionAPIData):
+    """ChatCompletionAPIData subclass for graph-backed session replay."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    event_id: str
+    registry: EventOutputRegistry
+    worker_tracker: WorkerSessionTracker
+    completion_queue: Any
+    total_events_in_session: int
+    # Back-reference to the worker's datagen so the last event of a session can evict the
+    # session's lazily-built graph from this worker (the worker never calls cleanup_session
+    # otherwise, so built graphs would accumulate for the whole stage). Set in load_lazy_data.
+    generator: Optional["ReplayGraphSessionGeneratorBase"] = None
+    predecessor_event_ids: List[str] = field(default_factory=list)
+    wait_ms: int = 0
+    input_segments: List[InputSegment] = field(default_factory=list)
+    original_messages: List[Dict[str, Any]] = field(default_factory=list)
+    expected_output_content: Optional[str] = None
+    skip_request: bool = False
+    expected_output_is_tool_call: bool = False
+    expected_output_tool_names: Optional[List[str]] = None
+    # KV-cache invalidation configuration
+    inject_random_session_id: bool = False
+    session_random_string: Optional[str] = None
+    override_tool_call_max_tokens: bool = False
+    # Whether to inject a tool_choice on recorded tool-call turns.
+    # See SessionReplayConfig.tool_choice_mode.
+    tool_choice_mode: ToolChoiceMode = ToolChoiceMode.FORCE_RECORDED
+    # Seconds to wait for predecessors before failing this event. 0 waits indefinitely;
+    # see SessionReplayConfig.predecessor_wait_timeout_sec.
+    predecessor_wait_timeout_sec: float = 3600.0
+    # Mitigation for tool-call responses with malformed JSON in `arguments`.
+    # `none` (default) is byte-identical to upstream main; `use_recorded`
+    # substitutes the recorded assistant message at the affected slot.
+    bad_tool_call_handling: BadToolCallHandling = BadToolCallHandling.NONE
+    # When True, output/shared segments are NOT substituted with live predecessor
+    # output; the recorded assistant messages are sent as-is. Predecessor wait
+    # timing is still enforced.
+    disable_output_substitution: bool = False
+    # Set by _build_messages_with_substitution when it calls record_failure
+    # early (e.g. recorded fallback also malformed). Lets the caller pass the
+    # right cause code and reason string to _fail_and_notify instead of a
+    # generic fallback.
+    _substitution_failure_reason: Optional[str] = None
+    _substitution_failure_cause: Optional[SessionFailureCause] = None
+
+    async def to_request_body(
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
+    ) -> Dict[str, Any]:
+        payload = await super().to_request_body(effective_model_name, max_tokens, ignore_eos, streaming)
+
+        if self.expected_output_is_tool_call and self.tool_definitions:
+            # A forced tool call MUST stop at its natural end-of-sequence: the model
+            # emits the call and is done. ignore_eos=True (the load default, used to
+            # make plain-text turns generate exactly N tokens) is WRONG here -- with
+            # EOS ignored the model emits the correct call then keeps generating,
+            # spilling chat-template control tokens (<|im_end|> etc.) into the
+            # arguments string until it hits max_tokens; replaying that malformed
+            # assistant message 400s the next turn. So force ignore_eos=False for
+            # ALL forced tool-call turns, regardless of override_tool_call_max_tokens.
+            payload["ignore_eos"] = False
+            if self.override_tool_call_max_tokens:
+                # The recorded output_tokens might come from a different model/tokenizer.
+                # Add tiered headroom for a different tool-call preamble or encoding,
+                # without multiplying already-large calls beyond the context window.
+                payload["max_tokens"] = _expand_tool_call_max_tokens(payload.get("max_tokens", 0))
+
+            if self.tool_choice_mode == ToolChoiceMode.AS_RECORDED:
+                # Send no tool_choice: the model chooses, and "required" is never
+                # sent. See ToolChoiceMode for the fidelity trade-off.
+                return payload
+
+            if "tool_choice" in payload:
+                logger.warning(
+                    f"Event {self.event_id}: payload already has tool_choice={payload['tool_choice']!r}; "
+                    f"overwriting with replay-enforced value."
+                )
+            names = self.expected_output_tool_names or []
+            # Build available set from self.tool_definitions (the raw list). The name
+            # field is set explicitly in to_request_body and is NOT passed through
+            # _clean_parameters, so it survives schema cleaning unchanged.
+            available = {t["name"] for t in self.tool_definitions if "name" in t}
+            if len(names) == 1 and names[0] in available:
+                # Force the exact function the original trace recorded. This maximises
+                # faithfulness to the trace and ensures the successor's role:tool messages
+                # (which reference this function by name/index) remain coherent.
+                payload["tool_choice"] = {"type": "function", "function": {"name": names[0]}}
+            else:
+                # Fall back to "required" when:
+                # - the recorded tool name is not in this call's tool_definitions (the
+                #   trace's tool lists don't always match its outputs — vLLM rejects
+                #   a tool_choice that names a function not present in tools), or
+                # - there were multiple tool calls (vLLM only accepts one name at a time).
+                payload["tool_choice"] = "required"
+        elif self.tool_definitions:
+            # PLAIN-TEXT turn that still advertises a tool catalog (the terminal
+            # "answer" turn of a tool loop, or a round principal in a multi-turn
+            # conversation). The recorded output here is a text answer, NOT a tool
+            # call -- but a model deep in a tool loop is primed to keep calling
+            # tools. Two failure modes if we let it: (1) it emits a STRUCTURED
+            # tool_call that, replayed as the prior turn of the NEXT round, has no
+            # matching role:tool result -> dangling tool_call_id -> 400; (2) with
+            # ignore_eos=True it never stops and spills <|im_end|> template tokens.
+            # tool_choice="none" forbids a structured call (a text <tool_call> in
+            # content is harmless -- no role:tool is expected for it), and
+            # ignore_eos=False lets the answer stop at its natural end.
+            #
+            # as_recorded suppresses the tool_choice here too, since the flag
+            # promises to inject none at all. ignore_eos=False stays: it is not a
+            # tool_choice policy, and without it this turn cannot stop.
+            if self.tool_choice_mode == ToolChoiceMode.FORCE_RECORDED:
+                payload["tool_choice"] = "none"
+            payload["ignore_eos"] = False
+
+        return payload
+
+    def _extract_session_id(self) -> str:
+        return self.event_id.split(":")[0] if ":" in self.event_id else self.event_id
+
+    def _fail_and_notify(self, session_id: str, cause: SessionFailureCause, reason: str) -> None:
+        """Mark this event and session as failed, notify the completion queue.
+
+        Called from wait_for_predecessors_and_substitute when we decide to skip
+        the request before it reaches the model server (predecessor failed,
+        session already failed, or substitution produced an invalid message).
+        Mirrors the queue notification logic in process_failure so the main-
+        process completion loop is not left waiting indefinitely.
+        """
+        self.skip_request = True
+        was_already_failed = self.worker_tracker.is_session_failed(session_id)
+        self.worker_tracker.mark_session_failed(session_id, cause, reason)
+        self.registry.record_failure(self.event_id)
+        logger.info(f"Event {self.event_id} skipping — {reason}")
+
+        if not was_already_failed and self.completion_queue is not None:
+            completion_time = time.perf_counter()
+            completed_so_far = self.worker_tracker.get_session_event_count(session_id)
+            cancelled = self.total_events_in_session - completed_so_far - 1
+            completion_data = {
+                "session_id": session_id,
+                "completion_time": completion_time,
+                "failed": True,
+                "failure_cause": cause.value,
+                "failure_reason": reason,
+                "cancelled_events": cancelled,
+                "event_completion_times": self.worker_tracker.get_session_completion_times(session_id),
+            }
+            try:
+                self.completion_queue.put_nowait(completion_data)
+                logger.debug(f"Pushed skip-failure notification for session {session_id} (cancelled_events={cancelled})")
+            except Exception as e:
+                logger.error(f"Failed to push skip-failure notification for session {session_id}: {e}")
+
+        # This event is now terminal (skipped). Count it toward the worker drain so the
+        # session is evicted once its last event drains.
+        self._mark_drained_and_maybe_evict(session_id)
+
+    def skip_if_session_failed(self, context: str) -> bool:
+        """Fail and retire this event if another event failed its session.
+
+        This is a lifecycle operation, not only a predicate: when the session
+        has failed it records this event's failure, sends any required session
+        notification, and marks the event drained.
+        """
+        session_id = self._extract_session_id()
+        if not self.worker_tracker.is_session_failed(session_id):
+            return False
+
+        self._fail_and_notify(
+            session_id,
+            SessionFailureCause.SESSION_ALREADY_FAILED,
+            f"session already failed ({context})",
+        )
+        return True
+
+    def _mark_drained_and_maybe_evict(self, session_id: str) -> None:
+        """Record this event as drained on the worker; evict the session once all drain.
+
+        Every event ends in exactly one terminal state on the worker — completed, skipped,
+        or request-failed — and each terminal path calls this exactly once. When the number
+        of drained events reaches total_events_in_session, the session is fully done on this
+        worker and its lazily-built graph can be freed.
+
+        This is what keeps a worker's resident memory bounded to roughly the concurrent
+        working set. Without it, each worker retains every session's graph it ever built for
+        the lifetime of the stage (the parent calls cleanup_session, but workers never do),
+        so memory grows with the number of sessions processed — catastrophically for large
+        corpora or high duplicate_sessions_target, especially when sessions fail fast and the
+        session pool churns quickly.
+
+        Eviction is safe here precisely because the session is fully drained: no further
+        events for it remain in flight or in the worker's queue, so nothing will try to read
+        the freed graph. (A session that fails mid-way still drains every event — the
+        successors flow through the skip path and are counted here too.)
+        """
+        if self.generator is None:
+            return
+        drained = self.worker_tracker.record_event_drained(session_id, self.event_id)
+        if drained >= self.total_events_in_session:
+            self.generator.evict_worker_session(session_id)
+
+    async def wait_for_predecessors_and_substitute(self) -> None:
+        session_id = self._extract_session_id()
+
+        if self.skip_if_session_failed("pre-wait check"):
+            return
+
+        if self.predecessor_event_ids:
+            logger.debug(f"Event {self.event_id} waiting for {len(self.predecessor_event_ids)} predecessor(s)")
+            try:
+                await asyncio.gather(
+                    *[
+                        self.registry.require_async(event_id, timeout_sec=self.predecessor_wait_timeout_sec)
+                        for event_id in self.predecessor_event_ids
+                    ]
+                )
+            except EventFailedError:
+                self._fail_and_notify(session_id, SessionFailureCause.PREDECESSOR_FAILED, "predecessor failed")
+                return
+            except (TimeoutError, asyncio.TimeoutError) as e:
+                self._fail_and_notify(
+                    session_id,
+                    SessionFailureCause.PREDECESSOR_WAIT_FAILED,
+                    f"predecessor wait failed: {type(e).__name__}",
+                )
+                return
+            logger.debug(f"Event {self.event_id} all predecessors done")
+
+        if self.wait_ms > 0:
+            wait_sec = self.wait_ms / 1000.0
+            logger.debug(f"Event {self.event_id} waiting {wait_sec:.3f}s (wait_ms={self.wait_ms})")
+            await asyncio.sleep(wait_sec)
+
+        # Substitute output segments with actual predecessor outputs, or inject random session ID into unique segments
+        needs_substitution = (not self.disable_output_substitution) and any(
+            seg.type == "output" or seg.type == "shared" or seg.type == "async_report" for seg in self.input_segments
+        )
+        # Inject random string if flag is enabled OR session is a duplicate
+        is_duplicate = ReplayGraphSessionGeneratorBase.is_duplicate_session(session_id)
+        needs_random_injection = (self.inject_random_session_id or is_duplicate) and any(
+            seg.type == "unique" for seg in self.input_segments
+        )
+        if needs_substitution or needs_random_injection:
+            if needs_substitution:
+                logger.debug(f"Event {self.event_id} substituting output/shared segments")
+            if needs_random_injection:
+                reason = "flag enabled" if self.inject_random_session_id else "duplicate session"
+                logger.debug(f"Event {self.event_id} injecting random session ID ({reason})")
+
+            substituted = self._build_messages_with_substitution()
+            # _build_messages_with_substitution calls record_failure and returns
+            # early when substitution is not possible (e.g. tool call expected but
+            # live model returned plain text). Detect that and skip the request.
+            if self.registry.is_event_failed(self.event_id):
+                reason = self._substitution_failure_reason or "Unknown"
+                cause = self._substitution_failure_cause or SessionFailureCause.UNKNOWN
+                self._fail_and_notify(session_id, cause, reason)
+                return
+            self.messages = [
+                ChatMessage(
+                    role=m["role"],
+                    content=m.get("content"),
+                    reasoning_content=m.get("reasoning") or m.get("reasoning_content"),
+                    tool_calls=m.get("tool_calls"),
+                    tool_call_id=m.get("tool_call_id"),
+                )
+                for m in substituted
+            ]
+            logger.debug(f"Event {self.event_id} substitution/injection complete, {len(self.messages)} messages")
+
+    def _build_messages_with_substitution(self) -> List[Dict[str, Any]]:
+        # NOTE: when input_segments is empty, the original_messages list is returned
+        # by reference (not copied). Callers must not mutate the returned list.
+        if not self.input_segments:
+            return self.original_messages
+
+        result: List[Dict[str, Any]] = []
+        cursor = 0
+
+        # Track where live tool-call assistant messages were inserted so we can
+        # rewrite the tool_call_id values in the role:tool messages that follow.
+        # Each entry is (index_of_assistant_in_result, live_tool_calls_list, recorded_tool_names).
+        #
+        # recorded_tool_names is the recorded (pre-substitution) function-name order
+        # for this slot, taken from the assistant message being replaced. It lets the
+        # post-pass pair each recorded role:tool message with the live call of the
+        # SAME function name rather than by raw position — necessary because the live
+        # model can call the same function more than once (or in a different order),
+        # which would otherwise pair the wrong result with the wrong call.
+        #
+        # We use a post-pass rather than rewriting inline because the role:tool
+        # messages live in a later segment ("unique") that hasn't been added to
+        # `result` yet when we process the "output" segment.
+        #
+        # index_of_assistant_in_result == len(result) at the time of the append,
+        # which equals the index the message will occupy after the append.
+        pending_id_rewrites: List[Tuple[int, List[Dict[str, Any]], List[Optional[str]]]] = []
+
+        for seg in self.input_segments:
+            seg_msgs = self.original_messages[cursor : cursor + seg.message_count]
+
+            if seg.type == "output":
+                # An output segment must cover exactly one message — the assistant
+                # turn that will be replaced by the predecessor's live output.
+                if seg.message_count != 1:
+                    logger.error(
+                        f"Event {self.event_id}: output segment has message_count={seg.message_count} "
+                        f"(expected 1). Using recorded messages to avoid index corruption."
+                    )
+                    result.extend(seg_msgs)
+                    cursor += seg.message_count
+                    continue
+
+                if seg.source_event_id:
+                    actual_message = self.registry.get_message_by_event_id(seg.source_event_id)
+                    if actual_message:
+                        live_tool_calls = actual_message.get("tool_calls")
+                        # Inline detection: if the live model produced tool_calls
+                        # AND bad_tool_call_handling is enabled, check each
+                        # `arguments` for valid JSON. Any failure means the next
+                        # request would 400 on the chat template's json.loads.
+                        bad_live = (
+                            _detect_bad_tool_calls(live_tool_calls)
+                            if (self.bad_tool_call_handling == BadToolCallHandling.USE_RECORDED and live_tool_calls)
+                            else []
+                        )
+                        if bad_live:
+                            # Substitute the recorded assistant message at this slot.
+                            # The recorded message is `seg_msgs[0]` (output segments
+                            # cover exactly one message — the assistant turn). Its
+                            # `tool_call_id` flows naturally into the role:tool
+                            # successors that follow in `original_messages`, so no
+                            # entry is appended to pending_id_rewrites for this
+                            # position. The wire body for the demoted slot is
+                            # structurally identical to a healthy replay.
+                            recorded_message = seg_msgs[0]
+                            recorded_tool_calls = recorded_message.get("tool_calls") or []
+                            # Defensive: if the recorded trace ALSO has malformed
+                            # tool_calls at this slot, we have no clean fallback.
+                            # Hard-fail the event; EventFailedError will cascade
+                            # to downstream events that await this one. Parallel
+                            # DAG branches continue.
+                            bad_recorded = _detect_bad_tool_calls(recorded_tool_calls)
+                            if bad_recorded:
+                                logger.error(
+                                    f"Event {self.event_id}: bad_tool_call_handling=use_recorded "
+                                    f"detected malformed live tool_calls from {seg.source_event_id}, "
+                                    f"but the recorded fallback is also malformed "
+                                    f"(errors={[e for (_, _, e) in bad_recorded]}). Failing event."
+                                )
+                                self._substitution_failure_reason = (
+                                    f"recorded fallback for {seg.source_event_id} is also malformed"
+                                )
+                                self._substitution_failure_cause = SessionFailureCause.RECORDED_FALLBACK_MALFORMED
+                                self.registry.record_failure(self.event_id)
+                                return result  # partial; caller checks is_event_failed
+                            # Tag the predecessor event_id for telemetry. Set
+                            # semantics dedupe across DAG fan-out.
+                            session_id = self._extract_session_id()
+                            pred_event_id = (
+                                seg.source_event_id.split(":", 1)[1] if ":" in seg.source_event_id else seg.source_event_id
+                            )
+                            self.worker_tracker.record_recorded_substitution(session_id, pred_event_id)
+                            result.append(recorded_message)
+                            logger.warning(
+                                f"Event {self.event_id}: substituted RECORDED message for "
+                                f"{seg.source_event_id} (live had {len(bad_live)} malformed "
+                                f"tool_call(s); recorded structurally clean)"
+                            )
+                        else:
+                            if live_tool_calls:
+                                # Record the position of this assistant message so the post-pass
+                                # can rewrite tool_call_id in the role:tool messages that follow.
+                                # recorded_tool_calls is the pre-substitution assistant message's
+                                # own tool_calls — the same recorded order the successor's role:tool
+                                # messages were emitted against — used to pair by function name.
+                                recorded_tool_calls = seg_msgs[0].get("tool_calls") or []
+                                recorded_tool_names = [tc.get("function", {}).get("name") for tc in recorded_tool_calls]
+                                pending_id_rewrites.append((len(result), live_tool_calls, recorded_tool_names))
+                            result.append(actual_message)
+                            logger.debug(
+                                f"Event {self.event_id}: substituted output segment with structured message from {seg.source_event_id}"
+                            )
+                    else:
+                        actual_output = self.registry.get_output_by_event_id(seg.source_event_id)
+                        logger.debug(
+                            f"Registry get for event {self.event_id} output segment from {seg.source_event_id} generated: {actual_output}"
+                        )
+                        logger.warning(
+                            f"Event {self.event_id}: unable to get the actual output message from {seg.source_event_id}. "
+                            f"Using output text instead. "
+                        )
+                        if actual_output:
+                            if self.expected_output_is_tool_call:
+                                # The live model returned plain text where a tool call was
+                                # expected (tool_choice was either absent or ignored). The
+                                # successor's role:tool messages will have dangling
+                                # tool_call_id references and the model server will likely
+                                # reject the next request. Treat this event as failed so
+                                # downstream events skip rather than send broken requests.
+                                logger.warning(
+                                    f"Event {self.event_id}: original output was a tool call but live model "
+                                    f"returned plain text. Marking event as failed to prevent downstream "
+                                    f"requests with dangling tool_call_id references."
+                                )
+                                self._substitution_failure_reason = (
+                                    "substitution failed (tool call expected but plain text returned)"
+                                )
+                                self._substitution_failure_cause = SessionFailureCause.SUBSTITUTION_TOOL_CALL_EXPECTED
+                                self.registry.record_failure(self.event_id)
+                                return result  # partial result; caller should check skip_request
+                            for msg in seg_msgs:
+                                substituted = dict(msg)
+                                substituted["content"] = actual_output
+                                result.append(substituted)
+                            logger.debug(
+                                f"Event {self.event_id}: substituted output segment with text output from {seg.source_event_id}"
+                            )
+                        else:
+                            logger.debug(
+                                f"Event {self.event_id}: output segment from {seg.source_event_id} "
+                                f"not available, using recorded content"
+                            )
+                            result.extend(seg_msgs)
+                else:
+                    logger.debug(f"Event {self.event_id}: output segment has no source_event_id, using recorded content")
+                    result.extend(seg_msgs)
+            elif seg.type == "async_report":
+                # Inject a child agent's live report TEXT into a role:"user" slot,
+                # wrapped in the `<task-notification><result>` envelope a real async
+                # harness delivers (see _wrap_async_notification). Content-only
+                # replacement, preserving role.
+                if seg.message_count != 1:
+                    logger.error(
+                        f"Event {self.event_id}: async_report segment has message_count="
+                        f"{seg.message_count} (expected 1). Using recorded message."
+                    )
+                    result.extend(seg_msgs)
+                    cursor += seg.message_count
+                    continue
+                recorded = seg_msgs[0]
+                if recorded.get("role") != "user":
+                    logger.error(
+                        f"Event {self.event_id}: async_report segment target role="
+                        f"{recorded.get('role')!r} (expected 'user'). Using recorded message."
+                    )
+                    result.append(recorded)
+                    cursor += 1
+                    continue
+                actual_output = self.registry.get_output_by_event_id(seg.source_event_id) if seg.source_event_id else None
+                if actual_output is not None:
+                    substituted = dict(recorded)
+                    substituted["content"] = _wrap_async_notification(actual_output)
+                    result.append(substituted)
+                else:
+                    # child output unavailable — fall back to recorded placeholder
+                    result.append(recorded)
+                cursor += 1
+                continue
+            elif seg.type == "shared":
+                if seg.source_event_id is None:
+                    logger.error(f"CRITICAL: Event {self.event_id} shared segment has no source_event_id")
+                    result.extend(seg_msgs)
+                    continue
+                seg_msgs_from_parent = self.registry.get_messages_by_event_id(seg.source_event_id)
+                if seg_msgs_from_parent is None:
+                    logger.error(
+                        f"CRITICAL: Event {self.event_id} shared segment from {seg.source_event_id} "
+                        f"has no messages in registry (should not happen after require_async)"
+                    )
+                    result.extend(seg_msgs)
+                else:
+                    # Only take the first seg.message_count messages from the parent.
+                    # The shared segment represents a prefix of the parent's messages,
+                    # not necessarily all of them. This handles cases where the parent
+                    # has more messages than the shared prefix length.
+                    seg_msgs_from_parent = seg_msgs_from_parent[: seg.message_count]
+
+                    logger.debug(
+                        f"Registry get for event {self.event_id} from {seg.source_event_id} "
+                        f"shared segment: using {len(seg_msgs_from_parent)} messages (prefix of parent's messages)"
+                    )
+
+                    # Validate that we have the expected number of messages after slicing
+                    if len(seg_msgs_from_parent) != seg.message_count:
+                        logger.warning(
+                            f"Event {self.event_id} shared segment from {seg.source_event_id} "
+                            f"expected {seg.message_count} messages but parent only has {len(seg_msgs_from_parent)}. "
+                            f"Using recorded messages as fallback."
+                        )
+                        result.extend(seg_msgs)
+                    else:
+                        for msg in seg_msgs_from_parent:
+                            if isinstance(msg, ChatMessage):
+                                result.append({k: v for k, v in msg.model_dump().items() if v is not None})
+                            else:
+                                result.append(dict(msg))
+            elif seg.type == "unique":
+                # Unique message - inject random session string if:
+                # 1. inject_random_session_id flag is enabled, OR
+                # 2. Session is a duplicate (matches pattern: {id}_dup{number})
+                for msg in seg_msgs:
+                    session_id = self._extract_session_id()
+                    is_duplicate = ReplayGraphSessionGeneratorBase.is_duplicate_session(session_id)
+                    should_inject = (self.inject_random_session_id or is_duplicate) and self.session_random_string
+
+                    if should_inject:
+                        # Use the session random string passed from SessionGraphState
+                        # Inject random string into message content
+                        msg_copy = dict(msg)
+                        original_content = msg_copy.get("content", "")
+
+                        # Prepend random session identifier to content; a parts list
+                        # (a message carrying an image) gets it as a leading text part.
+                        marker = f"[SESS:{self.session_random_string}] "
+                        if isinstance(original_content, list):
+                            msg_copy["content"] = [{"type": "text", "text": marker}, *original_content]
+                        else:
+                            msg_copy["content"] = f"{marker}{original_content}"
+                        result.append(msg_copy)
+                        reason = "flag enabled" if self.inject_random_session_id else "duplicate session"
+                        logger.debug(f"Event {self.event_id}: injected random session string ({reason})")
+                    else:
+                        result.append(msg)
+            else:
+                result.extend(seg_msgs)
+
+            cursor += seg.message_count
+
+        # Post-pass: rewrite tool_call_id values in role:tool messages so they match
+        # the live tool call IDs instead of the recorded (now stale) ones.
+        #
+        # Matched by recorded function name (not raw index), since the live model may
+        # call the same function a different number of times or in a different order
+        # than the recording did. Each recorded role:tool message pairs with the first
+        # unused live call of the same name; no match leaves it dangling (logged).
+        # If no tool_calls were recorded (empty recorded_tool_names), there's no name
+        # signal, so we fall back to positional pairing instead.
+        for assistant_idx, live_tool_calls, recorded_tool_names in pending_id_rewrites:
+            positional_fallback = not recorded_tool_names
+            bound = len(live_tool_calls) if positional_fallback else len(recorded_tool_names)
+            used_live_indices: Set[int] = set()
+            tool_result_idx = 0
+            for result_idx in range(assistant_idx + 1, len(result)):
+                if tool_result_idx >= bound:
+                    break
+                msg = result[result_idx]
+                if msg.get("role") == "tool":
+                    if positional_fallback:
+                        live_match_idx: Optional[int] = tool_result_idx
+                        recorded_name = None
+                    else:
+                        recorded_name = recorded_tool_names[tool_result_idx]
+                        live_match_idx = next(
+                            (
+                                i
+                                for i, tc in enumerate(live_tool_calls)
+                                if i not in used_live_indices and tc.get("function", {}).get("name") == recorded_name
+                            ),
+                            None,
+                        )
+                    if live_match_idx is not None:
+                        used_live_indices.add(live_match_idx)
+                        live_id = live_tool_calls[live_match_idx].get("id")
+                        if live_id:
+                            msg = dict(msg)  # copy before mutating — the dict may be shared
+                            msg["tool_call_id"] = live_id
+                            result[result_idx] = msg
+                            logger.debug(
+                                f"Event {self.event_id}: rewrote tool_call_id at position {result_idx} to live ID {live_id!r}"
+                            )
+                    else:
+                        logger.debug(
+                            f"Event {self.event_id}: no live tool call named {recorded_name!r} found for "
+                            f"recorded role:tool message at position {result_idx}; leaving its tool_call_id "
+                            f"dangling"
+                        )
+                    tool_result_idx += 1
+
+        return result
+
+    def on_completion(self, info: InferenceInfo) -> None:
+        output_text = info.output_text if isinstance(info, SessionInferenceInfo) else ""
+        output_text = output_text or ""
+        output_message = info.output_message if isinstance(info, SessionInferenceInfo) else None
+        self.registry.record(self.event_id, output_text, self.messages, output_message=output_message)
+        logger.debug(
+            f"calling registry record for event {self.event_id} num input messages {len(self.messages)} and output: {output_text}"
+        )
+        completion_time = time.perf_counter()
+        session_id = self._extract_session_id()
+        event_id = self.event_id.split(":", 1)[1] if ":" in self.event_id else self.event_id
+        self.worker_tracker.record_event_completed(session_id, event_id, completion_time)
+        logger.debug(f"Recorded event completion in worker tracker for {self.event_id}")
+
+        completed_count = self.worker_tracker.get_session_event_count(session_id)
+
+        if completed_count == self.total_events_in_session:
+            logger.debug(f"Session {session_id} completed all {self.total_events_in_session} events in worker")
+
+            session_failed = self.worker_tracker.is_session_failed(session_id)
+            completion_data: Dict[str, Any] = {
+                "session_id": session_id,
+                "completion_time": completion_time,
+                "failed": session_failed,
+                "event_completion_times": self.worker_tracker.get_session_completion_times(session_id),
+            }
+            # A session can reach this all-events-completed path already marked
+            # failed by an earlier event. Carry the recorded cause so the main
+            # process is not left with `failed: True` and no reason.
+            if session_failed:
+                recorded_failure = self.worker_tracker.get_session_failure(session_id)
+                cause, reason = recorded_failure or (SessionFailureCause.UNKNOWN.value, "session marked failed by worker")
+                completion_data["failure_cause"] = cause
+                completion_data["failure_reason"] = reason
+            # Telemetry: only emit recorded-substitution keys when at least
+            # one substitution fired in this session, so upstream-default runs
+            # (handling=none, or handling set but no malformed tool_calls
+            # observed) produce an identical wire format.
+            recorded_subst_ids = self.worker_tracker.get_session_recorded_substitution_event_ids(session_id)
+            if recorded_subst_ids:
+                completion_data["recorded_substitution_event_ids"] = recorded_subst_ids
+                completion_data["n_recorded_substitutions"] = len(recorded_subst_ids)
+
+            if self.completion_queue is not None:
+                try:
+                    self.completion_queue.put_nowait(completion_data)
+                    logger.debug(f"Pushed session {session_id} completion to queue")
+                except Exception as e:
+                    logger.error(f"Failed to push session {session_id} completion to queue: {e}")
+
+        # This event is now terminal (completed). Count it toward the worker drain and evict
+        # the session once its last event drains. Done last: eviction clears worker_tracker
+        # state for the session, so the completion-queue notification above must be built first.
+        self._mark_drained_and_maybe_evict(session_id)
+
+    async def process_response(
+        self,
+        response: ClientResponse,
+        config: APIConfig,
+        tokenizer: CustomTokenizer,
+        lora_adapter: Optional[str] = None,
+    ) -> SessionInferenceInfo:
+        """Process the LLM response, capture output text, and register it."""
+        logger.debug(f"process_response called for event {self.event_id}")
+        output_text: str = ""
+
+        actual_tool_names: List[str] = []
+        if config.streaming:
+            # Accumulate tool_call chunks alongside text content.
+            # delta.tool_calls is a list of partial objects; each chunk carries an
+            # index that identifies which tool call it belongs to.
+            tool_call_chunks = {}
+
+            def _extract_streaming_content(data: Dict[str, Any]) -> Optional[str]:
+                delta = data.get("choices", [{}])[0].get("delta", {})
+                for chunk in delta.get("tool_calls") or []:
+                    idx = chunk.get("index", 0)
+                    if idx not in tool_call_chunks:
+                        tool_call_chunks[idx] = {
+                            "id": chunk.get("id", ""),
+                            "type": chunk.get("type", "function"),
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    fn = chunk.get("function") or {}
+                    if fn.get("name"):
+                        tool_call_chunks[idx]["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        tool_call_chunks[idx]["function"]["arguments"] += fn["arguments"]
+                    if chunk.get("id"):
+                        tool_call_chunks[idx]["id"] = chunk["id"]
+
+                content = delta.get("content")
+                return str(content) if content is not None else None
+
+            parsed = await parse_sse_stream(
+                response,
+                extract_content=_extract_streaming_content,
+                extract_reasoning=lambda data: reasoning_field(data.get("choices", [{}])[0].get("delta", {})),
+            )
+            text_content, chunk_times, response_chunks, server_usage = (
+                parsed.output_text,
+                parsed.chunk_times,
+                parsed.response_chunks,
+                parsed.server_usage,
+            )
+            raw_content = parsed.raw_content
+
+            # Combine reasoning_content with text_content in output_text (used for token count)
+            reasoning_text = parsed.reasoning_text
+            if reasoning_text:
+                output_text = reasoning_text + text_content
+            else:
+                output_text = text_content
+
+            streaming_output_message: Optional[Dict[str, Any]] = None
+            if tool_call_chunks:
+                live_tool_calls = [tool_call_chunks[i] for i in sorted(tool_call_chunks)]
+                streaming_output_message = {"role": "assistant", "tool_calls": live_tool_calls}
+                if text_content:
+                    streaming_output_message["content"] = text_content
+            else:
+                streaming_output_message = {"role": "assistant", "content": text_content}
+
+            if reasoning_text:
+                streaming_output_message["reasoning_content"] = reasoning_text
+
+            prompt_len = self._resolve_prompt_tokens(server_usage, tokenizer)
+            server_completion_tokens = server_usage.get("completion_tokens") if server_usage else None
+            if server_completion_tokens is not None:
+                output_len = int(server_completion_tokens)
+            else:
+                tc_text = ""
+                if tool_call_chunks:
+                    tc_text = json.dumps([tool_call_chunks[i] for i in sorted(tool_call_chunks)], ensure_ascii=False)
+                output_len = tokenizer.count_tokens(output_text + tc_text)
+            info = SessionInferenceInfo(
+                request_metrics=RequestMetrics(text=Text(input_tokens=prompt_len), image=replayed_images(self.messages)),
+                response_metrics=StreamedResponseMetrics(
+                    response_chunks=response_chunks,
+                    chunk_times=chunk_times,
+                    output_tokens=output_len,
+                    output_token_times=parsed.generated_chunk_times,
+                    server_usage=server_usage,
+                    reasoning_chunks=parsed.reasoning_chunks,
+                    reasoning_chunk_times=parsed.reasoning_chunk_times,
+                ),
+                lora_adapter=lora_adapter,
+                output_text=output_text or None,
+                output_message=streaming_output_message,
+                extra_info={"raw_response": raw_content},
+            )
+            actual_tool_names = [tool_call_chunks[i]["function"]["name"] for i in sorted(tool_call_chunks)]
+        else:
+            data = await response.json()
+            server_usage = data.get("usage")
+            prompt_len = self._resolve_prompt_tokens(server_usage, tokenizer)
+            choices = data.get("choices", [])
+            output_message: Optional[Dict[str, Any]] = None
+            tool_calls = None
+            if choices:
+                msg_dict = choices[0].get("message", {})
+                text_content = msg_dict.get("content", "") or ""
+                tool_calls = msg_dict.get("tool_calls")
+                reasoning_content = msg_dict.get("reasoning") or msg_dict.get("reasoning_content")
+
+                # Combine reasoning_content with output text for the content field
+                if reasoning_content:
+                    output_text = reasoning_content + text_content
+                else:
+                    output_text = text_content
+
+                if tool_calls:
+                    output_message = {"role": "assistant", "tool_calls": tool_calls}
+                    if text_content:
+                        output_message["content"] = text_content
+                else:
+                    output_message = {"role": "assistant", "content": text_content}
+
+                if reasoning_content:
+                    output_message["reasoning_content"] = reasoning_content
+            server_completion_tokens = server_usage.get("completion_tokens") if server_usage else None
+            if server_completion_tokens is not None:
+                output_len = int(server_completion_tokens)
+            else:
+                tc_text = ""
+                if tool_calls:
+                    tc_text = json.dumps(tool_calls, ensure_ascii=False)
+                output_len = tokenizer.count_tokens(output_text + tc_text)
+            info = SessionInferenceInfo(
+                request_metrics=RequestMetrics(text=Text(input_tokens=prompt_len), image=replayed_images(self.messages)),
+                response_metrics=UnaryResponseMetrics(output_tokens=output_len, server_usage=server_usage),
+                lora_adapter=lora_adapter,
+                output_text=output_text or None,
+                output_message=output_message,
+            )
+            actual_tool_names = [tc["function"]["name"] for tc in (tool_calls or [])]
+
+        if self.expected_output_tool_names is not None:
+            # Compare as multisets
+            if Counter(actual_tool_names) != Counter(self.expected_output_tool_names):
+                logger.debug(
+                    f"Tool call name mismatch for event {self.event_id}: "
+                    f"expected {self.expected_output_tool_names}, got {actual_tool_names}"
+                )
+
+        # Register output and notify successors.
+        self.on_completion(info)
+
+        if output_text:
+            logger.debug(f"Registered output for event {self.event_id}: {len(output_text)} chars : {output_text}")
+        else:
+            logger.debug(f"Registered empty output for event {self.event_id}")
+
+        return info
+
+    async def process_failure(
+        self,
+        response: Optional[ClientResponse],
+        config: APIConfig,
+        tokenizer: CustomTokenizer,
+        exception: Exception,
+        lora_adapter: Optional[str] = None,
+    ) -> InferenceInfo:
+        logger.error(f"Request failed for event {self.event_id}: {type(exception).__name__}: {str(exception)}")
+
+        session_id = self._extract_session_id()
+        was_already_failed = self.worker_tracker.is_session_failed(session_id)
+        failure_reason = f"{type(exception).__name__}: {exception}"
+        self.worker_tracker.mark_session_failed(session_id, SessionFailureCause.REQUEST_FAILED, failure_reason)
+        self.registry.record_failure(self.event_id)
+
+        if not was_already_failed and self.completion_queue is not None:
+            completion_time = time.perf_counter()
+            completed_so_far = self.worker_tracker.get_session_event_count(session_id)
+            cancelled = self.total_events_in_session - completed_so_far - 1
+            completion_data = {
+                "session_id": session_id,
+                "completion_time": completion_time,
+                "failed": True,
+                "failure_cause": SessionFailureCause.REQUEST_FAILED.value,
+                "failure_reason": failure_reason,
+                "cancelled_events": cancelled,
+                "event_completion_times": self.worker_tracker.get_session_completion_times(session_id),
+            }
+
+            try:
+                logger.debug(f"Pushing immediate failure notification for session {session_id}")
+                self.completion_queue.put_nowait(completion_data)
+                logger.info(f"Session {session_id} failure notification sent to main process (cancelled_events={cancelled})")
+            except Exception as e:
+                logger.error(f"Failed to push session {session_id} failure notification to queue: {e}")
+
+        # This event is now terminal (request failed). Count it toward the worker drain. Note
+        # that when an event fails, its successors are still queued; they will be dequeued and
+        # flow through the skip path, each counted there. Eviction therefore only fires when
+        # the last of them drains — after which nothing re-reads the session — so the graph is
+        # never rebuilt by a late successor.
+        self._mark_drained_and_maybe_evict(session_id)
+
+        return SessionInferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=0)),
+            response_metrics=UnaryResponseMetrics(output_tokens=0),
+            lora_adapter=lora_adapter,
+            output_text="",
+        )
+
+
+class SessionAnthropicMessagesAPIData(SessionChatCompletionAPIData):
+    """Anthropic Messages APIData subclass for graph-backed session replay."""
+
+    def get_api_type(self) -> APIType:
+        return APIType.AnthropicMessages
+
+    def get_route(self) -> str:
+        return "/v1/messages"
+
+    async def to_request_body(
+        self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
+    ) -> Dict[str, Any]:
+        if self.max_tokens == 0:
+            self.max_tokens = max_tokens
+
+        payload = build_anthropic_request_body(
+            self.messages,
+            self.tool_definitions,
+            effective_model_name,
+            self.max_tokens,
+            streaming,
+        )
+
+        if self.expected_output_is_tool_call and self.tool_definitions:
+            if self.override_tool_call_max_tokens:
+                payload["max_tokens"] = _expand_tool_call_max_tokens(payload.get("max_tokens", 0))
+
+            if self.tool_choice_mode == ToolChoiceMode.AS_RECORDED:
+                # Inject nothing, as above.
+                return payload
+
+            names = self.expected_output_tool_names or []
+            available = {t["name"] for t in payload.get("tools", []) if "name" in t}
+            if len(names) == 1 and names[0] in available:
+                payload["tool_choice"] = {"type": "tool", "name": names[0]}
+            else:
+                payload["tool_choice"] = {"type": "any"}
+
+        return payload
+
+    async def process_response(
+        self,
+        response: ClientResponse,
+        config: APIConfig,
+        tokenizer: CustomTokenizer,
+        lora_adapter: Optional[str] = None,
+    ) -> SessionInferenceInfo:
+        logger.debug(f"process_response called for event {self.event_id}")
+
+        # The streaming branch always builds a message dict; the unary branch gets None back from
+        # parse_anthropic_content when the response carries no content blocks.
+        output_message: Optional[Dict[str, Any]]
+        if config.streaming:
+            parsed, output_message = await parse_anthropic_stream_response(response)
+            output_text, server_usage = parsed.output_text, parsed.server_usage
+            input_tokens = (server_usage or {}).get("input_tokens")
+            output_len = count_anthropic_output_tokens(tokenizer, output_text, parsed.reasoning_text)
+            base_info = InferenceInfo(
+                request_metrics=RequestMetrics(
+                    text=Text(
+                        input_tokens=int(input_tokens)
+                        if input_tokens is not None
+                        else count_anthropic_prompt_tokens(self.messages, tokenizer, self.tool_definitions)
+                    ),
+                    image=replayed_images(self.messages),
+                ),
+                response_metrics=StreamedResponseMetrics(
+                    response_chunks=parsed.response_chunks,
+                    chunk_times=parsed.chunk_times,
+                    output_tokens=output_len,
+                    output_token_times=parsed.generated_chunk_times,
+                    server_usage=server_usage,
+                    reasoning_chunks=parsed.reasoning_chunks,
+                    reasoning_chunk_times=parsed.reasoning_chunk_times,
+                ),
+                lora_adapter=lora_adapter,
+                extra_info={"raw_response": parsed.raw_content, "output_message": output_message, "output_text": output_text},
+            )
+        else:
+            data = await response.json()
+            usage = data.get("usage") or {}
+            output_text, output_message = parse_anthropic_content(data.get("content"))
+            input_tokens = usage.get("input_tokens")
+            output_len = count_anthropic_output_tokens(tokenizer, output_text, parse_anthropic_thinking(data.get("content")))
+            base_info = InferenceInfo(
+                request_metrics=RequestMetrics(
+                    text=Text(
+                        input_tokens=int(input_tokens)
+                        if input_tokens is not None
+                        else count_anthropic_prompt_tokens(self.messages, tokenizer, self.tool_definitions)
+                    ),
+                    image=replayed_images(self.messages),
+                ),
+                response_metrics=UnaryResponseMetrics(output_tokens=output_len, server_usage=usage or None),
+                lora_adapter=lora_adapter,
+                extra_info={
+                    "stop_reason": data.get("stop_reason"),
+                    "output_message": output_message,
+                    "output_text": output_text,
+                },
+            )
+
+        info = SessionInferenceInfo(
+            request_metrics=base_info.request_metrics,
+            response_metrics=base_info.response_metrics,
+            lora_adapter=lora_adapter,
+            output_text=output_text or None,
+            output_message=output_message,
+            extra_info=base_info.extra_info,
+        )
+        self.on_completion(info)
+
+        if output_text:
+            logger.debug(f"Registered output for event {self.event_id}: {len(output_text)} chars : {output_text}")
+        else:
+            logger.debug(f"Registered empty output for event {self.event_id}")
+
+        return info
+
+
+@dataclass
+class ReplaySessionState:
+    """Tracks graph traversal state for one session."""
+
+    session_id: str
+    graph: ReplayGraph
+    ready_events: Set[str]
+    dispatched_events: Set[str]
+    completed_events: Set[str]
+    event_completion_times: Dict[str, float]
+    is_active: bool = False
+    is_complete: bool = False
+    failed: bool = False
+    failure_reason: Optional[str] = None
+    failure_cause: Optional[str] = None
+    cancelled_events: int = 0
+    # perf_counter of the latest terminal notification the worker sent for this session,
+    # success or failure. A failure lands no event completion, so without this a session
+    # whose last request failed would look as if it ended at its last success.
+    terminal_perf_counter: Optional[float] = None
+    # Populated from completion_data when the worker finishes the
+    # session. None means the worker did not push the keys (i.e.
+    # bad_tool_call_handling=none); empty list means handling was
+    # enabled but no substitutions fired.
+    n_recorded_substitutions: Optional[int] = None
+    recorded_substitution_event_ids: Optional[List[str]] = None
+    random_string: Optional[str] = None  # Random string for KV-cache invalidation (shared by all events in session)
+
+
+@dataclass
+class ReplaySessionEvent:
+    """Represents a single replayable event derived from a graph event."""
+
+    call_id: str
+    event_id: str
+    session_index: int
+    t_start_ms: int
+    t_end_ms: int
+    model: str
+    messages: List[Dict[str, Any]]
+    expected_output: str
+    input_segments: List[InputSegment]
+    expected_output_tokens: int
+    temperature: Optional[float]
+    max_tokens_recorded: Optional[int]
+    predecessor_event_ids: List[str] = field(default_factory=list)
+    wait_ms: int = 0
+    tool_definitions: Optional[List[Dict[str, Any]]] = None
+
+
+@dataclass
+class ReplaySession:
+    """Represents one replayable session backed by a ReplayGraph."""
+
+    session_id: str
+    source_id: str
+    session_index: int
+    graph: ReplayGraph
+    start_offset_ms: int = 0
+
+
+class ReplayGraphSessionGeneratorBase(SessionGenerator, LazyLoadDataMixin):
+    """Shared runtime for ReplayGraph-backed session replay generators."""
+
+    def __init__(
+        self,
+        api_config: APIConfig,
+        config: DataConfig,
+        tokenizer: Optional[CustomTokenizer],
+        mp_manager: Optional[SyncManager] = None,
+        base_seed: Optional[int] = None,
+        num_workers: int = 1,
+        replay_config: Optional[SessionReplayConfig] = None,
+    ) -> None:
+        super().__init__(api_config, config, tokenizer)
+        self.config = config
+        self.replay_config = replay_config
+        self.mp_manager = mp_manager
+        self.num_workers = max(1, num_workers)
+        self.base_seed = base_seed if base_seed is not None else 42
+
+        self.output_registry = EventOutputRegistry()
+        self.worker_tracker = WorkerSessionTracker()
+        if mp_manager is not None:
+            self.session_completion_queue: Any = mp_manager.Queue()
+        else:
+            self.session_completion_queue = None
+
+        self.sessions: List[Optional[ReplaySession]] = []
+        self._session_ids: List[str] = []
+        self._session_id_to_index: Dict[str, int] = {}
+        self.session_graph_state: Dict[str, ReplaySessionState] = {}
+        # Per-session event lists keyed by session_index. Populated on demand by
+        # _ensure_session_built (lazy path) or all at once by initialize_sessions (eager path).
+        self._session_events: Dict[int, List[ReplaySessionEvent]] = {}
+        # Flat list kept only for the eager initialize_sessions() path / back-compat.
+        self.all_events: List[ReplaySessionEvent] = []
+        self._skipped_session_count: int = 0
+        # Corpus cycling, for a stage bounded by time rather than by session count: an index
+        # at or past _corpus_session_count replays `index % _corpus_session_count` under a
+        # distinct id, so a trace can be played again without colliding with its own state.
+        # Resolution is pure arithmetic over state fixed before workers fork, so the parent
+        # and every worker agree without sharing anything — a worker only ever sees its
+        # fork-time snapshot. Only the lazy path opts in; see initialize_sessions_lazy.
+        self._corpus_cycling_enabled: bool = False
+        self._corpus_session_count: int = 0
+        self._cycle_base_ids: List[str] = []
+        self._cycle_logged: bool = False
+
+    def initialize_sessions(self, sessions: List[ReplaySession]) -> None:
+        """Finalize generator state from fully-built sessions (eager path)."""
+        # Duplicate sessions if needed to meet total session requirements
+        if self.replay_config and self.replay_config.duplicate_sessions_target is not None:
+            sessions = self._duplicate_sessions_if_needed(sessions, self.replay_config.duplicate_sessions_target)
+
+        if not sessions:
+            raise ValueError("No valid replay sessions found")
+
+        # Assign session_index to match position in list after shuffling/duplication
+        for i, session in enumerate(sessions):
+            session.session_index = i
+
+        self.sessions = list(sessions)
+        self._build_replay_schedule()
+        # No cycling snapshot here on purpose: these sessions are the only copy of their
+        # graphs, so serving a replay would mean holding them all for the whole run and
+        # defeating the release in cleanup_session. A duration-bounded stage on this path
+        # ends when the corpus does, and the runtime warns the window fell short.
+        logger.info(
+            "Built replay schedule: %d events across %d sessions (eager)",
+            len(self.all_events),
+            len(self.sessions),
+        )
+
+    def initialize_sessions_lazy(self, session_ids: List[str]) -> None:
+        """Set up placeholder slots for on-demand graph building (lazy path).
+
+        Allocates None session slots and records their IDs so get_session_count()
+        works immediately. Each session's graph is built later by _ensure_session_built,
+        triggered the first time the session is dispatched (parent) or replayed (worker).
+        """
+        if not session_ids:
+            raise ValueError("No valid trace records found after filtering")
+        self.sessions = [None] * len(session_ids)
+        self._session_ids = list(session_ids)
+        self._session_id_to_index = {sid: i for i, sid in enumerate(session_ids)}
+        self._session_events = {}
+        self.all_events = []
+        # Snapshot for cycling, taken before any worker forks. Safe to opt in here because
+        # _build_session rebuilds any slot from its source record, so a replay needs nothing
+        # kept alive between plays.
+        self._corpus_cycling_enabled = True
+        self._corpus_session_count = len(session_ids)
+        self._cycle_base_ids = list(session_ids)
+        logger.info("Lazy init: %d session slots allocated", len(session_ids))
+
+    def _build_session(self, session_index: int) -> Optional[ReplaySession]:
+        """Build the ReplaySession for one slot. Implemented by lazy subclasses."""
+        raise NotImplementedError("Lazy generators must implement _build_session()")
+
+    def supports_corpus_cycling(self) -> bool:
+        """Whether this generator can serve session indices past the loaded corpus.
+
+        A duration-bounded stage keeps drawing sessions until its deadline, so it needs
+        indices beyond the corpus to resolve to replays rather than raise. True only on the
+        lazy path, which can rebuild a slot from its source record; see initialize_sessions.
+        """
+        return self._corpus_cycling_enabled
+
+    def _cycled_session_id(self, session_index: int, source_slot: int, play: int) -> str:
+        """Id for a replay of source_slot. Distinct per play, so state cannot collide.
+
+        `_dup{N}` is the existing duplicate-session convention, which also drives the
+        prefix-cache marker (see is_duplicate_session), so a replay is not a free cache hit.
+        """
+        return f"{self._cycle_base_ids[source_slot]}_dup{play}"
+
+    def _on_cycled_slot(self, session_index: int, source_slot: int) -> None:
+        """Hook for subclasses to record how to build a replay index. Default: nothing."""
+
+    def _register_cycled_slots(self, session_index: int) -> None:
+        """Grow the local index tables to cover session_index. Idempotent.
+
+        Called in whichever process asks. Both sides derive identical entries because the
+        inputs (_corpus_session_count, _cycle_base_ids) were fixed before the fork.
+        """
+        if session_index < len(self._session_ids):
+            return
+        if not self.supports_corpus_cycling():
+            raise IndexError(
+                f"Session index {session_index} out of range (total: {len(self.sessions)}) and this "
+                f"generator does not support corpus cycling"
+            )
+        if not self._cycle_logged:
+            # Once, so replaying is never silent: expected under duration, notable elsewhere.
+            self._cycle_logged = True
+            logger.info(
+                "Corpus of %d session(s) exhausted; replaying it from the start (first index %d)",
+                self._corpus_session_count,
+                session_index,
+            )
+        for idx in range(len(self._session_ids), session_index + 1):
+            source_slot = idx % self._corpus_session_count
+            play = idx // self._corpus_session_count
+            session_id = self._cycled_session_id(idx, source_slot, play)
+            self._session_ids.append(session_id)
+            self._session_id_to_index[session_id] = idx
+            self.sessions.append(None)
+            self._on_cycled_slot(idx, source_slot)
+
+    def _ensure_session_built(self, session_index: int) -> None:
+        """Build and register session_index's graph if not already done. Idempotent."""
+        if session_index < 0:
+            raise IndexError(f"Session index {session_index} out of range (total: {len(self.sessions)})")
+        if session_index >= len(self.sessions):
+            self._register_cycled_slots(session_index)
+        if self.sessions[session_index] is not None or session_index in self._session_events:
+            return
+        session = self._build_session(session_index)
+        if session is None:
+            # No graph (e.g. malformed spans, or all calls errored with include_errors=False).
+            # Register an empty event list as the "already attempted" sentinel so this slot is
+            # not retried on subsequent calls. The dispatcher skips it (see is_session_buildable).
+            self._session_events[session_index] = []
+            self._skipped_session_count += 1
+            return
+        session.session_index = session_index
+        self.sessions[session_index] = session
+        events = self._build_session_schedule(session)
+        self._session_events[session_index] = events
+        logger.debug("Built session %s: %d events", session.session_id, len(events))
+
+    def is_session_buildable(self, session_index: int) -> bool:
+        """Return True if session_index has (or can build) a graph, False if it produced none.
+
+        Builds the session on demand (idempotent). Lets the dispatcher skip un-buildable
+        slots without raising. Skipped sessions are not reported anywhere (see dispatch_session).
+        """
+        self._ensure_session_built(session_index)
+        session = self.sessions[session_index]
+        if session is None:
+            logger.warning(f"Skipping session {session_index} ({self._session_ids[session_index]!r}): no graph could be built")
+            return False
+        events = self._session_events.get(session_index, [])
+        if not events:
+            logger.warning(
+                f"Skipping session {session_index} ({self._session_ids[session_index]!r}): graph built but no schedulable events"
+            )
+            self._skipped_session_count += 1
+            return False
+        logger.info("Dispatching session %s: %d events", session.session_id, len(events))
+        return True
+
+    @staticmethod
+    def _duplicate_sessions_if_needed(sessions: List[ReplaySession], target_sessions: int) -> List[ReplaySession]:
+        """Duplicate sessions to ensure we have enough for high-concurrency testing.
+
+        This is useful when the trace corpus is smaller than needed for stress testing.
+        Sessions are duplicated with unique IDs to avoid conflicts.
+
+        Args:
+            sessions: List of sessions to potentially duplicate
+            target_sessions: Target number of sessions to reach by duplication
+
+        Returns:
+            List of sessions (original + duplicates if needed)
+        """
+        current_count = len(sessions)
+
+        if current_count >= target_sessions:
+            logger.info(f"Session corpus sufficient: {current_count} sessions available (target: {target_sessions})")
+            return sessions
+
+        # Calculate how many duplicates we need
+        duplicates_needed = target_sessions - current_count
+        logger.warning(
+            f"Session corpus small: {current_count} sessions available. "
+            f"Duplicating to reach {target_sessions} sessions for stress testing."
+        )
+
+        # Duplicate sessions in round-robin fashion
+        original_sessions = list(sessions)
+        duplicate_count = 0
+        session_idx = 0
+
+        while len(sessions) < target_sessions:
+            # Get next session to duplicate (round-robin)
+            source_session = original_sessions[session_idx % len(original_sessions)]
+            session_idx += 1
+            duplicate_count += 1
+
+            # Create duplicate with unique ID
+            # Note: session_index will be reassigned in initialize_sessions() to match list position
+            duplicate_session = ReplaySession(
+                session_id=f"{source_session.session_id}_dup{duplicate_count}",
+                source_id=source_session.source_id,
+                session_index=-1,  # Placeholder, will be reassigned after duplication
+                graph=source_session.graph,
+                start_offset_ms=source_session.start_offset_ms,
+            )
+
+            sessions.append(duplicate_session)
+
+        logger.info(f"Duplicated {duplicates_needed} sessions. Total sessions now: {len(sessions)}")
+        return sessions
+
+    @staticmethod
+    def is_duplicate_session(session_id: str) -> bool:
+        """Check if a session is a duplicate based on its ID.
+
+        Duplicates are created with the pattern: {original_id}_dup{number}
+        This method uses regex to robustly detect this pattern.
+
+        Args:
+            session_id: The session ID to check
+
+        Returns:
+            True if the session is a duplicate, False otherwise
+        """
+        # Match pattern: anything followed by _dup and one or more digits at the end
+        return bool(re.search(r"_dup\d+$", session_id))
+
+    def get_supported_apis(self) -> List[APIType]:
+        return [APIType.Chat, APIType.AnthropicMessages]
+
+    def is_preferred_worker_requested(self) -> bool:
+        return True
+
+    def _build_replay_schedule(self) -> None:
+        """Build the full schedule from self.sessions (eager path / tests)."""
+        self.all_events = []
+        self._session_events = {}
+        self._session_ids = [s.session_id for s in self.sessions if s is not None]
+        self._session_id_to_index = {sid: i for i, sid in enumerate(self._session_ids)}
+        for session in self.sessions:
+            if session is None:
+                continue
+            events = self._build_session_schedule(session)
+            self._session_events[session.session_index] = events
+            self.all_events.extend(events)
+
+    def _build_session_schedule(self, session: ReplaySession) -> List[ReplaySessionEvent]:
+        """Register one session's graph state and return its qualified events.
+
+        Builds the per-session ReplaySessionState (incl. the KV-cache-invalidation
+        random_string, which is generated for duplicate sessions or when
+        inject_random_session_id is set) and stores it in session_graph_state.
+        """
+        random_string = None
+        is_duplicate = ReplayGraphSessionGeneratorBase.is_duplicate_session(session.session_id)
+        if (self.replay_config and self.replay_config.inject_random_session_id) or is_duplicate:
+            random_string = uuid.uuid4().hex[:16]
+            logger.debug(f"Generated random string for session {session.session_id}: {random_string}")
+
+        state = ReplaySessionState(
+            session_id=session.session_id,
+            graph=session.graph,
+            ready_events=set(),
+            dispatched_events=set(),
+            completed_events=set(),
+            event_completion_times={},
+            is_active=False,
+            is_complete=False,
+            random_string=random_string,
+        )
+        self.session_graph_state[session.session_id] = state
+
+        events: List[ReplaySessionEvent] = []
+        for event in session.graph.events.values():
+            gc = event.call
+
+            if not gc.messages:
+                logger.warning("Call %s in event %s has no messages, skipping", gc.call_id, event.event_id)
+                continue
+
+            qualified_event_id = f"{session.session_id}:{event.event_id}"
+            qualified_predecessor_ids = [f"{session.session_id}:{pid}" for pid in event.predecessor_event_ids]
+            qualified_segments = [
+                dc_replace(seg, source_event_id=f"{session.session_id}:{seg.source_event_id}")
+                if seg.source_event_id is not None
+                else seg
+                for seg in gc.input_segments
+            ]
+
+            events.append(
+                ReplaySessionEvent(
+                    call_id=gc.call_id,
+                    event_id=qualified_event_id,
+                    session_index=session.session_index,
+                    t_start_ms=event.t_start_ms,
+                    t_end_ms=event.t_end_ms,
+                    model=gc.model,
+                    messages=gc.messages,
+                    expected_output=gc.expected_output,
+                    input_segments=qualified_segments,
+                    expected_output_tokens=gc.expected_output_tokens,
+                    temperature=gc.temperature,
+                    max_tokens_recorded=gc.max_tokens_recorded,
+                    predecessor_event_ids=qualified_predecessor_ids,
+                    wait_ms=min(event.wait_ms, self.replay_config.max_wait_ms) if self.replay_config else event.wait_ms,
+                    tool_definitions=gc.tool_definitions,
+                )
+            )
+        return events
+
+    def get_session_count(self) -> int:
+        return len(self._session_ids)
+
+    def _get_session(self, session_index: int) -> ReplaySession:
+        """Return the built session at session_index, building it on demand if needed."""
+        # No bounds check of its own: checking here would reject the replay indices the call
+        # below is about to register. _ensure_session_built is the single place that decides,
+        # and still raises IndexError for a negative index or a non-cycling generator.
+        self._ensure_session_built(session_index)
+        session = self.sessions[session_index]
+        if session is None:
+            raise RuntimeError(f"Session {session_index} ({self._session_ids[session_index]!r}) produced no graph")
+        return session
+
+    def get_session_event_indices(self, session_index: int) -> List[int]:
+        self._ensure_session_built(session_index)
+        return list(range(len(self._session_events.get(session_index, []))))
+
+    def get_session_info(self, session_index: int) -> Dict[str, Any]:
+        session = self._get_session(session_index)
+        num_events = len(self._session_events.get(session_index, []))
+        return {
+            "session_id": session.session_id,
+            "file_path": session.source_id,
+            "source_id": session.source_id,
+            "session_index": session.session_index,
+            "num_events": num_events,
+            "num_graph_events": len(session.graph.events),
+            "start_offset_ms": session.start_offset_ms,
+        }
+
+    def get_session_events(self, session_index: int) -> List[LazyLoadInferenceAPIData]:
+        session = self._get_session(session_index)
+        events = self._session_events.get(session_index, [])
+        session_worker_id = abs(hash(session.session_id)) % self.num_workers
+        return [
+            SessionReplayLazyLoadData(
+                session_index=session_index,
+                local_event_index=local,
+                preferred_worker_id=session_worker_id,
+            )
+            for local in range(len(events))
+        ]
+
+    def build_session_metric(
+        self,
+        session_id: str,
+        stage_id: int,
+        start_time: float,
+        end_time: float,
+    ) -> SessionLifecycleMetric:
+        state = self.session_graph_state.get(session_id)
+        if state is None:
+            raise ValueError(f"Unknown session: {session_id}")
+
+        # Resolved through the index, not by walking self.sessions: cycling appends a slot
+        # per replay and cleanup leaves finished ones as None, so a scan would get longer
+        # with every replay. The slot is still populated here, since every caller builds
+        # the metric before cleanup_session frees it.
+        session_index = self._session_id_to_index.get(session_id)
+        session = self.sessions[session_index] if session_index is not None and session_index < len(self.sessions) else None
+        source_id = session.source_id if session is not None else ""
+        num_events = (
+            len(self._session_events[session_index])
+            if session_index is not None and session_index in self._session_events
+            else len(state.graph.events)
+        )
+        num_events_completed = len(state.completed_events)
+        if state.failed:
+            # A failure reports its own count: the worker knows which event failed and how
+            # many downstream events it cancelled, which is not simply "everything left".
+            num_events_cancelled = state.cancelled_events
+        elif not state.is_complete:
+            # Cut short at the stage boundary. The session never reached a terminal state,
+            # so nothing computed a cancellation count for it - but the events that had not
+            # finished when the stage stopped were cancelled along with it, and saying 0
+            # would leave the numbers not adding up to the events the session had.
+            num_events_cancelled = max(num_events - num_events_completed, 0)
+        else:
+            num_events_cancelled = 0
+
+        # `state.failed` alone must produce an error, not just `failure_reason`.
+        # The report's success predicate is derived from `error is None`, so a
+        # session the worker marked failed but for which no reason was recorded
+        # would otherwise be counted as SUCCEEDED whenever all its events
+        # completed. Every producer now carries a cause, making the fallback
+        # below a safety net rather than a routine path.
+        error = None
+        if state.failed or state.failure_reason:
+            error = ErrorResponseInfo(
+                error_type=state.failure_cause or SessionFailureCause.UNKNOWN.value,
+                error_msg=state.failure_reason or "session marked failed without a recorded reason",
+            )
+
+        # Extract user-facing leaf event IDs and confidence from the graph
+        user_facing_event_ids = [eid for eid, event in state.graph.events.items() if event.is_user_facing]
+        num_structured_output_excluded = sum(1 for event in state.graph.events.values() if event.is_structured_output_call)
+
+        return SessionLifecycleMetric(
+            session_id=session_id,
+            stage_id=stage_id,
+            file_path=source_id,
+            start_time=start_time,
+            end_time=end_time,
+            duration_sec=end_time - start_time,
+            num_events=num_events,
+            num_events_completed=num_events_completed,
+            num_events_cancelled=num_events_cancelled,
+            error=error,
+            n_recorded_substitutions=state.n_recorded_substitutions,
+            recorded_substitution_event_ids=state.recorded_substitution_event_ids,
+            user_facing_event_ids=user_facing_event_ids,
+            num_structured_output_excluded=num_structured_output_excluded,
+        )
+
+    def activate_session(self, session_id: str) -> None:
+        state = self.session_graph_state.get(session_id)
+        if state is None:
+            logger.warning("Attempted to activate unknown session: %s", session_id)
+            return
+
+        state.is_active = True
+        root_events = {event_id for event_id, event in state.graph.events.items() if not event.predecessor_event_ids}
+        state.ready_events.update(root_events)
+        logger.debug("Activated session %s with %d root events", session_id, len(root_events))
+
+    def flush_incomplete_sessions(self) -> None:
+        """Hand the parent the progress of sessions still open as this worker winds down.
+
+        A worker reports a session exactly once, when it reaches a terminal state. That is
+        enough while sessions are allowed to finish, but a stage bounded by duration stops
+        with sessions mid-flight, and those never reach a terminal state - so the parent is
+        left with no record of them at all and reports zero events completed for a session
+        that may have got most of the way through.
+
+        The worker is the only process that knows: every completion was recorded in its own
+        tracker. This pushes that record across, flagged ``partial`` so the parent merges the
+        event times without treating the session as finished.
+        """
+        queue = getattr(self, "session_completion_queue", None)
+        tracker = getattr(self, "worker_tracker", None)
+        if queue is None or tracker is None:
+            return
+
+        for session_id in tracker.get_tracked_session_ids():
+            # A failed session already reported itself, cancellation count included.
+            if tracker.is_session_failed(session_id):
+                continue
+            completion_times = tracker.get_session_completion_times(session_id)
+            if not completion_times:
+                continue
+            try:
+                queue.put_nowait(
+                    {
+                        "session_id": session_id,
+                        "partial": True,
+                        "event_completion_times": completion_times,
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Failed to flush partial progress for session {session_id}: {e}")
+
+    def _process_completion_queue(self) -> None:
+        if self.session_completion_queue is None:
+            return
+
+        try:
+            while True:
+                completion_data = self.session_completion_queue.get_nowait()
+                completed_session_id = completion_data["session_id"]
+
+                completed_state = self.session_graph_state.get(completed_session_id)
+                if completed_state is not None:
+                    event_times = completion_data.get("event_completion_times", {})
+                    for event_id, completion_time in event_times.items():
+                        if event_id not in completed_state.completed_events:
+                            completed_state.completed_events.add(event_id)
+                            completed_state.event_completion_times[event_id] = completion_time
+
+                    # Bad tool-call handling telemetry. The two keys are
+                    # gated worker-side behind `len(...) > 0`, so their
+                    # absence here is meaningful (no substitution path
+                    # exercised) and we propagate that absence to the
+                    # session metric as None.
+                    if "n_recorded_substitutions" in completion_data:
+                        completed_state.n_recorded_substitutions = completion_data["n_recorded_substitutions"]
+                        completed_state.recorded_substitution_event_ids = completion_data.get(
+                            "recorded_substitution_event_ids", []
+                        )
+                    # A partial flush is a worker handing over the progress of a session that
+                    # is still open, because the stage is winding down and the session will
+                    # never reach a terminal state to report itself. Take the event times and
+                    # stop there: marking it complete would tell the load generator the
+                    # session finished, which would drop it out of the truncated set and back
+                    # into the success counts - the opposite of what the flush is for.
+                    if completion_data.get("partial", False):
+                        logger.debug(
+                            "Session %s reported partial progress from queue notification (%d events)",
+                            completed_session_id,
+                            len(event_times),
+                        )
+                        continue
+
+                    completed_state.is_complete = True
+                    terminal_time = completion_data.get("completion_time")
+                    if terminal_time is not None:
+                        previous = completed_state.terminal_perf_counter
+                        completed_state.terminal_perf_counter = (
+                            terminal_time if previous is None else max(previous, terminal_time)
+                        )
+                    # Failure is sticky in both directions. A session that any
+                    # worker payload reported as failed stays failed, and the
+                    # first recorded reason wins: a later payload for an
+                    # already-failed session (e.g. the all-events-completed
+                    # push arriving after a skip-failure push) must not blank
+                    # out a real cause by overwriting it with None.
+                    completed_state.failed = completed_state.failed or completion_data.get("failed", False)
+                    incoming_reason = completion_data.get("failure_reason")
+                    if incoming_reason is not None and completed_state.failure_reason is None:
+                        completed_state.failure_reason = incoming_reason
+                        completed_state.failure_cause = completion_data.get("failure_cause")
+                    completed_state.cancelled_events = completion_data.get("cancelled_events", 0)
+                    logger.debug(
+                        "Session %s marked complete from queue notification (failed=%s)",
+                        completed_session_id,
+                        completed_state.failed,
+                    )
+        except Exception:
+            pass
+
+    def get_session_state(self, session_id: str) -> Optional[ReplaySessionState]:
+        return self.session_graph_state.get(session_id)
+
+    def session_end_perf_counter(self, session_id: str) -> Optional[float]:
+        # The later of its last event completion and its last terminal notification, so a
+        # session whose last request failed ends at the failure. All recorded by the worker
+        # on its own perf_counter, the same monotonic clock the dispatch anchor is read
+        # from, so they can be subtracted from it (as TFUT does).
+        state = self.session_graph_state.get(session_id)
+        if state is None:
+            return None
+        times = list(state.event_completion_times.values())
+        if state.terminal_perf_counter is not None:
+            times.append(state.terminal_perf_counter)
+        return max(times) if times else None
+
+    def check_session_completed(self, session_id: str) -> bool:
+        self._process_completion_queue()
+
+        state = self.session_graph_state.get(session_id)
+        if state is None:
+            logger.warning("Attempted to check unknown session: %s", session_id)
+            return False
+
+        if state.is_complete:
+            return True
+
+        shared_failed = getattr(self, "shared_failed_sessions", None)
+        if shared_failed is not None:
+            is_failed = session_id in shared_failed
+            if is_failed:
+                state.is_complete = True
+                logger.info("Session %s marked as complete due to failure", session_id)
+                return True
+
+        return False
+
+    def _resolve_event(self, data: LazyLoadInferenceAPIData) -> ReplaySessionEvent:
+        """Resolve a queued lazy item to its ReplaySessionEvent.
+
+        Per-session addressing (lazy path): build session_index on demand, index
+        local_event_index. Legacy global addressing (eager path): index all_events.
+        """
+        if isinstance(data, SessionReplayLazyLoadData):
+            self._ensure_session_built(data.session_index)
+            events = self._session_events.get(data.session_index, [])
+            if data.local_event_index >= len(events):
+                raise IndexError(
+                    f"Local event index {data.local_event_index} out of range for session {data.session_index} (total: {len(events)})"
+                )
+            return events[data.local_event_index]
+
+        n = data.data_index
+        if n < 0 or n >= len(self.all_events):
+            raise IndexError(f"Event index {n} out of range (total: {len(self.all_events)})")
+        return self.all_events[n]
+
+    def load_lazy_data(self, data: LazyLoadInferenceAPIData) -> InferenceAPIData:
+        event = self._resolve_event(data)
+
+        chat_messages = []
+        original_messages: List[Dict[str, Any]] = []
+        for msg in event.messages:
+            if isinstance(msg, dict):
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                tool_calls = msg.get("tool_calls")
+                tool_call_id = msg.get("tool_call_id")
+                reasoning_content = msg.get("reasoning") or msg.get("reasoning_content")
+            else:
+                role = getattr(msg, "role", "user")
+                content = getattr(msg, "text", "")
+                tool_calls = getattr(msg, "tool_calls", None)
+                tool_call_id = getattr(msg, "tool_call_id", None)
+                reasoning_content = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
+
+            if tool_calls is not None:
+                # Preserve any assistant preamble content alongside the tool calls
+                # so chat_messages (which becomes the wire payload when no
+                # substitution/injection runs) is not lossy.
+                has_image = isinstance(content, list) and any(is_image_part(b) for b in content)
+                tc_content = content if (isinstance(content, str) or has_image) and content else None
+                chat_messages.append(
+                    ChatMessage(role=role, content=tc_content, tool_calls=tool_calls, reasoning_content=reasoning_content)
+                )
+                tc_msg: Dict[str, Any] = {"role": role, "tool_calls": tool_calls}
+                if tc_content is not None:
+                    tc_msg["content"] = tc_content
+                if reasoning_content:
+                    tc_msg["reasoning_content"] = reasoning_content
+                original_messages.append(tc_msg)
+                continue
+
+            # A parts list carrying a recorded image is sent as is; any other list is
+            # flattened to text.
+            if isinstance(content, list) and not any(is_image_part(block) for block in content):
+                content_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            content_parts.append(block.get("text", ""))
+                        else:
+                            content_parts.append(json.dumps(block))
+                    else:
+                        content_parts.append(str(block))
+                content = " ".join(content_parts)
+
+            content_out: Any = content if isinstance(content, list) else str(content)
+            # Carry tool_call_id onto the ChatMessage too (not just original_messages),
+            # so role:tool linkage survives on the wire when substitution is disabled.
+            # tool_call_id belongs on a role:tool message only — don't leak it onto
+            # user/assistant messages even if the recorded message carried one.
+            wire_tool_call_id = tool_call_id if role == "tool" else None
+            chat_messages.append(
+                ChatMessage(
+                    role=role, content=content_out, tool_call_id=wire_tool_call_id, reasoning_content=reasoning_content
+                )
+            )
+            orig_msg: Dict[str, Any] = {"role": role, "content": content_out}
+            if wire_tool_call_id is not None:
+                orig_msg["tool_call_id"] = wire_tool_call_id
+            if reasoning_content:
+                orig_msg["reasoning_content"] = reasoning_content
+            original_messages.append(orig_msg)
+
+        max_tokens = event.expected_output_tokens
+        session_id = event.event_id.split(":")[0] if ":" in event.event_id else event.event_id
+        raw_event_id = event.event_id.split(":", 1)[1] if ":" in event.event_id else event.event_id
+        state = self.session_graph_state.get(session_id)
+        session_index = event.session_index
+        total_events = len(self._session_events.get(session_index, [])) if state else 0
+
+        gc = state.graph.events[raw_event_id].call if state and raw_event_id in state.graph.events else None
+
+        # Request identity can differ from the enclosing scheduler session.
+        # Keep event IDs and lifecycle tracking scoped to that enclosing session.
+        request_session_id = None
+        if data.session_id and gc and gc.session_id_suffix:
+            request_session_id = data.session_id + gc.session_id_suffix
+
+        api_data_class: type[SessionChatCompletionAPIData] = SessionChatCompletionAPIData
+        api_config = getattr(self, "api_config", None)
+        if api_config is not None and api_config.type == APIType.AnthropicMessages:
+            api_data_class = SessionAnthropicMessagesAPIData
+
+        api_data = api_data_class(
+            messages=chat_messages,
+            max_tokens=max_tokens,
+            tool_definitions=event.tool_definitions,
+            event_id=event.event_id,
+            registry=self.output_registry,
+            worker_tracker=getattr(self, "worker_tracker", WorkerSessionTracker()),
+            completion_queue=getattr(self, "session_completion_queue", None),
+            total_events_in_session=total_events,
+            predecessor_event_ids=event.predecessor_event_ids,
+            wait_ms=event.wait_ms,
+            input_segments=event.input_segments,
+            original_messages=original_messages,
+            expected_output_content=event.expected_output,
+            expected_output_is_tool_call=gc.expected_output_is_tool_call if gc else False,
+            expected_output_tool_names=gc.expected_output_tool_names if gc else None,
+            otel_context=data.otel_context,
+            session_id=data.session_id,
+            request_session_id=request_session_id,
+            preferred_worker_id=data.preferred_worker_id,
+            # Pass KV-cache invalidation configuration and session random string
+            inject_random_session_id=self.replay_config.inject_random_session_id if self.replay_config else False,
+            session_random_string=state.random_string if state else None,
+            override_tool_call_max_tokens=self.replay_config.override_tool_call_max_tokens if self.replay_config else False,
+            tool_choice_mode=self.replay_config.tool_choice_mode if self.replay_config else ToolChoiceMode.FORCE_RECORDED,
+            predecessor_wait_timeout_sec=self.replay_config.predecessor_wait_timeout_sec if self.replay_config else 3600.0,
+            # Mitigation knob: read once per event from replay_config. Default
+            # NONE keeps the wire format byte-identical to upstream main.
+            bad_tool_call_handling=self.replay_config.bad_tool_call_handling
+            if self.replay_config
+            else BadToolCallHandling.NONE,
+            disable_output_substitution=getattr(self.replay_config, "disable_output_substitution", False)
+            if self.replay_config
+            else False,
+            # Back-reference so the event can evict this session from the worker once drained.
+            generator=self,
+        )
+        api_data.graph_event_id = raw_event_id
+        return api_data
+
+    def cleanup_session(self, session_id: str) -> None:
+        state = self.session_graph_state.get(session_id)
+        if state is None:
+            logger.warning("Attempted to cleanup unknown session: %s", session_id)
+            return
+
+        event_count = len(state.graph.events)
+        for event_id in state.graph.events.keys():
+            qualified_event_id = f"{session_id}:{event_id}"
+            self.output_registry._event_output_text.pop(qualified_event_id, None)
+            self.output_registry._event_output_message.pop(qualified_event_id, None)
+            self.output_registry._event_input_messages.pop(qualified_event_id, None)
+            self.output_registry._event_signals.pop(qualified_event_id, None)
+            self.output_registry._failed_event_ids.discard(qualified_event_id)
+
+        del self.session_graph_state[session_id]
+
+        # Free the lazily-built graph and event list so a completed session's memory is
+        # released (it was only retained between dispatch and completion). Without this the
+        # parent accumulates every dispatched session's graph for the whole run, which blows
+        # up RAM for large corpora / high duplicate_sessions_target. Re-access (if it ever
+        # happened) would rebuild on demand via _ensure_session_built.
+        idx = self._session_id_to_index.get(session_id)
+        if idx is not None:
+            if idx < len(self.sessions):
+                self.sessions[idx] = None
+            self._session_events.pop(idx, None)
+
+        logger.debug("Cleaned up session %s: removed %d events from memory", session_id, event_count)
+
+    def evict_worker_session(self, session_id: str) -> None:
+        """Free a fully-drained session's memory inside a worker process.
+
+        The parent process frees sessions via cleanup_session in its dispatch loop, but
+        workers never call cleanup_session — so in the lazy path each worker would retain
+        every graph it ever built for the whole stage. This is called by the data object
+        (_mark_drained_and_maybe_evict) when a session's last event drains on this worker,
+        making per-worker memory track the concurrent working set instead of the full corpus.
+
+        Reuses cleanup_session to drop the built graph, event list, traversal state, and
+        output-registry entries, then clears the per-worker WorkerSessionTracker bookkeeping
+        for the session (which cleanup_session does not touch).
+        """
+        self.cleanup_session(session_id)
+        tracker = getattr(self, "worker_tracker", None)
+        if tracker is not None:
+            tracker.forget_session(session_id)
+        logger.debug("Worker evicted fully-drained session %s", session_id)

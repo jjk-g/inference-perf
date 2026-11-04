@@ -1,0 +1,219 @@
+import numpy as np
+import pytest
+
+from inference_perf.apis import CompletionAPIData, LazyLoadInferenceAPIData
+from inference_perf.config import APIConfig, APIType, DataConfig, Distribution, DataGenType, DistributionType
+from inference_perf.datagen.synthetic.random_datagen import RandomDataGenerator
+from inference_perf.utils.custom_tokenizer import CustomTokenizer
+from typing import Any
+
+
+class DummyTokenizer:
+    vocab_size = 1000
+    all_special_ids = [1, 2, 3]
+
+    def encode(self, text: str) -> list[int]:
+        try:
+            return [int(t) for t in text.split()]
+        except ValueError:
+            return [4, 5, 6]
+
+    def decode(self, tokens: list[int], **kwargs: Any) -> str:
+        return " ".join(str(t) for t in tokens)
+
+
+class DummyCustomTokenizer(CustomTokenizer):
+    def __init__(self) -> None:
+        pass
+
+    def get_tokenizer(self) -> Any:
+        return DummyTokenizer()
+
+    def count_tokens(self, text: str, add_special_tokens: bool = True) -> int:
+        return len(text.split())
+
+
+def test_random_datagen_yields_string() -> None:
+    api_config = APIConfig(type=APIType.Completion, streaming=True)
+    data_config = DataConfig(
+        type=DataGenType.Random,
+        input_distribution=Distribution(min=10, max=20, mean=15, std_dev=2, total_count=5),
+        output_distribution=Distribution(min=5, max=10, mean=7, std_dev=1, total_count=5),
+    )
+    tokenizer = DummyCustomTokenizer()
+
+    generator = RandomDataGenerator(api_config, data_config, tokenizer)
+
+    # RandomDataGenerator uses LazyLoadDataMixin, so get_data() yields LazyLoadInferenceAPIData
+    data_gen = generator.get_data()
+    lazy_data = next(data_gen)
+    assert isinstance(lazy_data, LazyLoadInferenceAPIData)
+
+    # Load the real data
+    real_data = generator.load_lazy_data(lazy_data)
+    assert isinstance(real_data, CompletionAPIData)
+
+    # Verify prompt is str
+    assert isinstance(real_data.prompt, str)
+    assert len(real_data.prompt) > 0
+
+
+def test_worker_rng_uniqueness_per_worker() -> None:
+    """Workers must produce different content even when all input lengths are identical (std_dev=0)."""
+    api_config = APIConfig(type=APIType.Completion, streaming=True)
+    data_config = DataConfig(
+        type=DataGenType.Random,
+        input_distribution=Distribution(min=10, max=10, mean=10, std_dev=0.0, total_count=5),
+        output_distribution=Distribution(min=5, max=5, mean=5, std_dev=0.0, total_count=5),
+    )
+    tokenizer = DummyCustomTokenizer()
+
+    # Simulate what Worker.run() does: reseed the datagen's rng with a worker-specific seed.
+    # Worker 0 and Worker 1 use (base_seed + id) % 2**32, so they differ.
+    base_seed = 42
+
+    generator_w0 = RandomDataGenerator(api_config, data_config, tokenizer)
+    generator_w0.rng = np.random.default_rng((base_seed + 0) % 2**32)
+
+    generator_w1 = RandomDataGenerator(api_config, data_config, tokenizer)
+    generator_w1.rng = np.random.default_rng((base_seed + 1) % 2**32)
+
+    lazy = LazyLoadInferenceAPIData(data_index=0)
+    result_w0 = generator_w0.load_lazy_data(lazy)
+    result_w1 = generator_w1.load_lazy_data(lazy)
+
+    assert isinstance(result_w0, CompletionAPIData)
+    assert isinstance(result_w1, CompletionAPIData)
+    assert result_w0.prompt != result_w1.prompt, "Workers with different seeds must produce different prompts"
+
+
+def test_random_datagen_excludes_special_tokens() -> None:
+    api_config = APIConfig(type=APIType.Completion, streaming=True)
+    data_config = DataConfig(
+        type=DataGenType.Random,
+        input_distribution=Distribution(min=10, max=20, mean=15, std_dev=2, total_count=5),
+        output_distribution=Distribution(min=5, max=10, mean=7, std_dev=1, total_count=5),
+    )
+    tokenizer = DummyCustomTokenizer()
+
+    generator = RandomDataGenerator(api_config, data_config, tokenizer)
+    data_gen = generator.get_data()
+    lazy_data = next(data_gen)
+    assert isinstance(lazy_data, LazyLoadInferenceAPIData)
+    real_data = generator.load_lazy_data(lazy_data)
+
+    assert isinstance(real_data, CompletionAPIData)
+    # Verify no special tokens in prompt by encoding it back
+    encoded_ids = tokenizer.get_tokenizer().encode(real_data.prompt)
+    for token in encoded_ids:
+        assert token not in [1, 2, 3]
+
+
+class ChatTemplateDummyCustomTokenizer(DummyCustomTokenizer):
+    """Dummy with a 2-word 'chat template' so wrapping math is testable."""
+
+    def has_chat_template(self) -> bool:
+        return True
+
+    def apply_chat_template(self, text: str) -> str:
+        return f"<user> {text} <assistant>"
+
+
+def test_random_datagen_use_chat_template_wraps_prompt() -> None:
+    api_config = APIConfig(type=APIType.Completion, streaming=True)
+    data_config = DataConfig(
+        type=DataGenType.Random,
+        use_chat_template=True,
+        input_distribution=Distribution(min=10, max=20, mean=15, std_dev=2, total_count=5),
+        output_distribution=Distribution(min=5, max=10, mean=7, std_dev=1, total_count=5),
+    )
+    tokenizer = ChatTemplateDummyCustomTokenizer()
+
+    generator = RandomDataGenerator(api_config, data_config, tokenizer)
+    for i in range(5):
+        real_data = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=i))
+        assert isinstance(real_data, CompletionAPIData)
+        assert real_data.prompt.startswith("<user> ")
+        assert real_data.prompt.endswith(" <assistant>")
+        # The configured length targets the fully templated prompt.
+        assert tokenizer.count_tokens(real_data.prompt, add_special_tokens=False) == generator.input_lengths[i]
+        # Templated prompts must tell the server not to prepend another BOS.
+        assert real_data.add_special_tokens is False
+
+
+def test_random_datagen_without_chat_template_leaves_request_untouched() -> None:
+    api_config = APIConfig(type=APIType.Completion, streaming=True)
+    data_config = DataConfig(
+        type=DataGenType.Random,
+        input_distribution=Distribution(min=10, max=20, mean=15, std_dev=2, total_count=5),
+        output_distribution=Distribution(min=5, max=10, mean=7, std_dev=1, total_count=5),
+    )
+    generator = RandomDataGenerator(api_config, data_config, DummyCustomTokenizer())
+    real_data = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=0))
+    assert isinstance(real_data, CompletionAPIData)
+    assert real_data.add_special_tokens is None
+
+
+def test_random_datagen_use_chat_template_requires_template() -> None:
+    api_config = APIConfig(type=APIType.Completion, streaming=True)
+    data_config = DataConfig(
+        type=DataGenType.Random,
+        use_chat_template=True,
+        input_distribution=Distribution(min=10, max=20, mean=15, std_dev=2, total_count=5),
+        output_distribution=Distribution(min=5, max=10, mean=7, std_dev=1, total_count=5),
+    )
+
+    class NoTemplateDummy(DummyCustomTokenizer):
+        def has_chat_template(self) -> bool:
+            return False
+
+    with pytest.raises(ValueError, match="no chat template"):
+        RandomDataGenerator(api_config, data_config, NoTemplateDummy())
+
+
+def test_random_datagen_use_chat_template_min_length_guard() -> None:
+    api_config = APIConfig(type=APIType.Completion, streaming=True)
+    # Targets of 1-2 tokens cannot exceed the dummy template's 2-token overhead.
+    data_config = DataConfig(
+        type=DataGenType.Random,
+        use_chat_template=True,
+        input_distribution=Distribution(min=1, max=2, mean=2, std_dev=1, total_count=5),
+        output_distribution=Distribution(min=5, max=10, mean=7, std_dev=1, total_count=5),
+    )
+    with pytest.raises(ValueError, match="chat template overhead"):
+        RandomDataGenerator(api_config, data_config, ChatTemplateDummyCustomTokenizer())
+
+
+def test_random_datagen_distribution_types() -> None:
+    api_config = APIConfig(type=APIType.Completion, streaming=True)
+    data_config = DataConfig(
+        type=DataGenType.Random,
+        input_distribution=Distribution(
+            type=DistributionType.FIXED,
+            min=10,
+            max=20,
+            mean=15,
+            std_dev=2,
+            total_count=5,
+        ),
+        output_distribution=Distribution(
+            type=DistributionType.FIXED,
+            min=5,
+            max=10,
+            mean=7,
+            std_dev=1,
+            total_count=5,
+        ),
+    )
+    tokenizer = DummyCustomTokenizer()
+
+    generator = RandomDataGenerator(api_config, data_config, tokenizer)
+
+    # With FIXED type, all generated lengths must be exactly equal to the mean
+    assert len(generator.input_lengths) == 5
+    for length in generator.input_lengths:
+        assert length == 15
+
+    assert len(generator.output_lengths) == 5
+    for length in generator.output_lengths:
+        assert length == 7

@@ -13,30 +13,86 @@
 # limitations under the License.
 
 from abc import abstractmethod
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional
 from aiohttp import ClientResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, SerializeAsAny, computed_field, model_serializer
+from inference_perf.payloads import RequestBody, RequestMetrics
 from inference_perf.utils.custom_tokenizer import CustomTokenizer
 from inference_perf.config import APIConfig, APIType
 
 
-class UnaryInferenceResponseInfo(BaseModel):
+class ResponseMetrics(BaseModel):
     output_tokens: int = 0
-
-
-class StreamedInferenceResponseInfo(BaseModel):
-    response_chunks: List[str] = []
-    chunk_times: List[float] = []
-    output_tokens: int = 0
-    output_token_times: List[float] = []
+    # Last-seen `usage` dict reported by the server (streaming: the trailing
+    # usage chunk; non-streaming: the response body's `usage`).
     server_usage: Optional[dict[str, Any]] = None
 
 
+class UnaryResponseMetrics(ResponseMetrics):
+    pass
+
+
+class StreamedResponseMetrics(ResponseMetrics):
+    response_chunks: List[str] = []
+    chunk_times: List[float] = []
+    # Every generated token, reasoning included. The basis for TTFT, TPOT and
+    # ITL, since the server generates and counts reasoning tokens like any
+    # other (#559).
+    output_token_times: List[float] = []
+    # Reasoning-only chunks (delta.reasoning_content / delta.reasoning, or
+    # Anthropic thinking deltas). Kept apart from response_chunks/chunk_times,
+    # which stay the content channel alone and give time to first output token.
+    reasoning_chunks: List[str] = []
+    reasoning_chunk_times: List[float] = []
+
+
 class InferenceInfo(BaseModel):
-    input_tokens: int = 0
+    request_metrics: RequestMetrics
+    response_metrics: Optional[SerializeAsAny[ResponseMetrics]] = None
     extra_info: dict[str, Any] = {}
     lora_adapter: Optional[str] = None
-    response_info: Optional[Union[UnaryInferenceResponseInfo, StreamedInferenceResponseInfo]] = None
+    graph_event_id: Optional[str] = None
+    labels: dict[str, str] = {}
+    # Extra attempts spent on connection faults raised before a response was
+    # established, and whether one of them went on to succeed. 0/False on the
+    # overwhelming majority of requests; a request that used up its attempts reports
+    # the count with retries_recovered False. See LoadConfig.request_retries.
+    retries_attempted: int = 0
+    retries_recovered: bool = False
+    # Time this request spent on attempts that failed, plus the backoff waited between
+    # them: the share of its end-to-end latency that bought nothing. Counted on
+    # requests that never succeeded too, where every attempt was wasted. None unless a
+    # retry happened, so RequestLifecycleMetric.start_time stays the single definition
+    # of when the request was dispatched.
+    retry_wasted_sec: Optional[float] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_retry_fields_when_absent(self, handler: Any) -> dict[str, Any]:
+        """Drop every retry field from a request that never retried.
+
+        Keeps per_request_lifecycle_metrics.json free of `retries_attempted: 0`,
+        `retries_recovered: false` and `retry_wasted_sec: null` on every entry of a run
+        that hit no transport faults. `retries_attempted` is the discriminator: the
+        client always sets it, and it is non-zero on exactly the requests the other two
+        fields describe.
+        """
+        dumped: dict[str, Any] = handler(self)
+        if not dumped.get("retries_attempted"):
+            for key in ("retries_attempted", "retries_recovered", "retry_wasted_sec"):
+                dumped.pop(key, None)
+        elif dumped.get("retry_wasted_sec") is None:
+            dumped.pop("retry_wasted_sec", None)
+        return dumped
+
+    # DEPRECATED: mirror of request_metrics.text.input_tokens kept at the top
+    # level for back-compat with parsers of pre-multimodal
+    # per_request_lifecycle_metrics.json. Slated for removal alongside the
+    # lifecycle-report rewrite — new consumers should read
+    # request_metrics.text.input_tokens.
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def input_tokens(self) -> int:
+        return self.request_metrics.text.input_tokens
 
 
 class ErrorResponseInfo(BaseModel):
@@ -47,6 +103,7 @@ class ErrorResponseInfo(BaseModel):
 class RequestLifecycleMetric(BaseModel):
     stage_id: Optional[int] = None
     session_id: Optional[str] = None
+    request_session_id: Optional[str] = None
     scheduled_time: float
     start_time: float
     end_time: float
@@ -69,17 +126,81 @@ class SessionLifecycleMetric(BaseModel):
     num_events: int
     num_events_completed: int
     num_events_cancelled: Optional[int] = None
+    # True when the stage boundary (its configured duration, or a timeout or
+    # interrupt) cut this session short before its graph finished. The event and
+    # token counts are real, but the duration is an artifact of where the boundary
+    # fell, so summarize_sessions keeps a truncated session out of the
+    # success/failure counts and the duration percentiles and reports it under
+    # num_sessions_truncated instead. The requests it did complete still count in
+    # the request-level metrics.
+    truncated: bool = False
+    # Per-session count of events whose live tool_call response was
+    # detected malformed and replaced with the recorded assistant
+    # message at substitution time. None when bad_tool_call_handling
+    # is `none` (the upstream-default). Zero when handling is enabled
+    # but no malformed tool_calls were observed.
+    n_recorded_substitutions: Optional[int] = None
+    recorded_substitution_event_ids: Optional[List[str]] = None
+    # Per-session sum of extra attempts spent on connection faults raised before
+    # response headers were obtained, and how many of those requests went on to
+    # succeed. Omitted from the serialized session when the session hit no transport
+    # faults, so per_session_lifecycle_metrics.json is unchanged for a run that never
+    # retried. See LoadConfig.request_retries.
+    retries_attempted: int = 0
+    retries_recovered: int = 0
     success: Optional[bool] = None
     error: Optional[ErrorResponseInfo] = None
     total_input_tokens: Optional[int] = None
     total_output_tokens: Optional[int] = None
+    # Per-session sum of prompt tokens served from the server-side KV/prefix
+    # cache (usage.prompt_tokens_details.cached_tokens). None when no request in
+    # the session reported server usage (non-streaming, or a vLLM build that
+    # omits or nulls prompt_tokens_details) — distinct from 0, which means the
+    # field was present but no tokens were cached.
+    total_cached_tokens: Optional[int] = None
+    # Denominator for the per-session cache hit rate: sum of the server-reported
+    # usage.prompt_tokens over exactly the requests that contributed to
+    # total_cached_tokens. This is deliberately NOT total_input_tokens, which is
+    # the client-side re-tokenized count — mixing a server numerator with a
+    # client denominator skews the ratio by the tokenizer's disagreement with the
+    # server (chat template and tool-schema overhead the client does not model)
+    # and can push it above 1.0. None whenever total_cached_tokens is None.
+    total_cacheable_input_tokens: Optional[int] = None
+    # TFUT (Time to First User Token) — per-session user-perceived latency.
+    # Anchored on session dispatch time (includes client-side queue delay),
+    # not the moment the first request reached the server.
+    user_facing_event_ids: Optional[List[str]] = None
+    num_structured_output_excluded: Optional[int] = None
+    tfut_sec: Optional[float] = None
+    tfut_none_reason: Optional[str] = None
+    dispatch_perf_counter: Optional[float] = Field(default=None, exclude=True)
+
+    @model_serializer(mode="wrap")
+    def _omit_retry_fields_when_absent(self, handler: Any) -> dict[str, Any]:
+        """Drop both retry counters from a session that never retried.
+
+        Mirrors InferenceInfo, so per_session_lifecycle_metrics.json does not carry a
+        pair of zeros on every session of a run that hit no transport faults.
+        """
+        dumped: dict[str, Any] = handler(self)
+        if not dumped.get("retries_attempted"):
+            dumped.pop("retries_attempted", None)
+            dumped.pop("retries_recovered", None)
+        return dumped
 
 
 class InferenceAPIData(BaseModel):
     # loadgen should assign this request to preferred worker if possible
     preferred_worker_id: int = -1  # no preferred worker by default
     session_id: Optional[str] = None  # set by loadgen for session-based workloads
+    # Optional wire identity for a conversation within the enclosing replay
+    # session. session_id remains the scheduler/reporting identity.
+    request_session_id: Optional[str] = None
+    graph_event_id: Optional[str] = None
     otel_context: Optional[dict[str, str]] = None  # OTEL trace context for distributed tracing
+    stage_id: int = 0  # stage id
+    headers: Optional[dict[str, str]] = None
+    labels: dict[str, str] = {}
 
     @abstractmethod
     def get_api_type(self) -> APIType:
@@ -90,9 +211,9 @@ class InferenceAPIData(BaseModel):
         raise NotImplementedError
 
     @abstractmethod
-    async def to_payload(
+    async def to_request_body(
         self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
-    ) -> dict[str, Any]:
+    ) -> RequestBody:
         raise NotImplementedError
 
     @abstractmethod
@@ -132,9 +253,9 @@ class LazyLoadInferenceAPIData(InferenceAPIData):
     def get_route(self) -> str:
         raise NotImplementedError("LazyLoadInferenceAPIData doesn't support this operation")
 
-    async def to_payload(
+    async def to_request_body(
         self, effective_model_name: str, max_tokens: int, ignore_eos: bool, streaming: bool
-    ) -> dict[str, Any]:
+    ) -> RequestBody:
         raise NotImplementedError("LazyLoadInferenceAPIData doesn't support this operation")
 
     async def process_response(

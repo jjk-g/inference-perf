@@ -1,0 +1,1135 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from typing import Any
+from typing import cast
+
+import pytest
+from inference_perf.reportgen.base import (
+    ReportGenerator,
+    compute_request_latency_metrics,
+    summarize_prompt_token_usage,
+    summarize_requests,
+)
+from inference_perf.apis.base import (
+    RequestLifecycleMetric,
+    InferenceInfo,
+    StreamedResponseMetrics,
+    UnaryResponseMetrics,
+    SessionLifecycleMetric,
+)
+from inference_perf.client.server_metrics.base import StageRuntimeInfo, StageStatus
+from inference_perf.config.reportgen.config import RequestLifecycleMetricsReportConfig
+from inference_perf.payloads import RequestMetrics, Text
+
+# The percentile list real reports use; the token-usage metrics must surface all of these.
+DEFAULT_PERCENTILES = RequestLifecycleMetricsReportConfig().percentiles
+
+
+def test_summarize_requests_tpot_calculation() -> None:
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(output_tokens=10, output_token_times=[1.0, 2.0, 3.0]),
+    )
+
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="test_request", info=info, error=None
+    )
+
+    # Duration = 3.0 - 1.0 = 2.0
+    # Actual tokens = 10
+    # Expected TPOT = 2.0 / (10 - 1) = 2.0 / 9 = 0.222...
+
+    result = summarize_requests([metric], [50])
+
+    assert result is not None
+    successes = result.successes
+    assert "latency" in successes
+    assert "time_per_output_token" in successes["latency"]
+    tpot_summary = successes["latency"]["time_per_output_token"]
+    assert tpot_summary["mean"] == pytest.approx(2.0 / 9.0)
+
+
+def test_summarize_requests_tpot_fallback() -> None:
+    # Test fallback when output_tokens is not available or <= 1
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(output_tokens=0, output_token_times=[1.0, 2.0, 3.0]),
+    )
+
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="test_request", info=info, error=None
+    )
+
+    # Duration = 3.0 - 1.0 = 2.0
+    # Count = 3
+
+    result = summarize_requests([metric], [50])
+
+    assert result is not None
+    successes = result.successes
+    tpot_summary = successes["latency"]["time_per_output_token"]
+    assert tpot_summary is None
+
+
+def test_summarize_requests_with_chunks() -> None:
+    from unittest.mock import Mock
+
+    mock_tokenizer = Mock()
+    # Assume 1 chunk has 2 tokens, another has 3 tokens
+    mock_tokenizer.count_tokens.side_effect = lambda text, **kwargs: 2 if "hello" in text else (3 if "world" in text else 0)
+
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(
+            # output_tokens is the API layer's whole-message count; chunks drive timing (TPOT/TTFT).
+            output_tokens=5,
+            response_chunks=['{"choices": [{"text": "hello"}]}', '{"choices": [{"text": "world"}]}'],
+            chunk_times=[1.0, 2.0],
+        ),
+    )
+
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="test_request", info=info, error=None
+    )
+
+    result = summarize_requests([metric], [50], tokenizer=mock_tokenizer)
+
+    assert result is not None
+    successes = result.successes
+
+    tpot_summary = successes["latency"]["time_per_output_token"]
+    assert tpot_summary["mean"] == pytest.approx(0.25)
+
+    ttft_summary = successes["latency"]["time_to_first_token"]
+    assert ttft_summary["mean"] == pytest.approx(1.0)
+
+
+def test_summarize_requests_multiple_tokens_same_timestamp() -> None:
+    from unittest.mock import Mock
+
+    mock_tokenizer = Mock()
+    mock_tokenizer.count_tokens.side_effect = lambda text, **kwargs: 3 if "hello" in text else 0
+
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(response_chunks=['{"choices": [{"text": "hello"}]}'], chunk_times=[1.0]),
+    )
+
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="test_request", info=info, error=None
+    )
+
+    summarize_requests([metric], [50], tokenizer=mock_tokenizer)
+
+    assert isinstance(metric.info.response_metrics, StreamedResponseMetrics)
+    assert metric.info.response_metrics.output_token_times == [1.0, 1.0, 1.0]
+
+
+def test_itl_not_inflated_by_per_chunk_bos() -> None:
+    """Regression for the ITL half of #564, using the real
+    neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8 tokenizer, which prepends a BOS
+    on every call. Re-tokenizing each streamed chunk with special tokens adds
+    one phantom token per chunk (doubling len(output_token_times) and halving
+    ITL); counting with add_special_tokens=False keeps the per-token timestamp
+    series at the true token count, so ITL lands on the same basis as TPOT.
+    """
+    import json
+    from inference_perf.config import CustomTokenizerConfig
+    from inference_perf.utils.custom_tokenizer import CustomTokenizer
+
+    try:
+        tokenizer = CustomTokenizer(
+            CustomTokenizerConfig(pretrained_model_name_or_path="neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8")
+        )
+    except Exception as e:  # offline CI / HF hub unreachable
+        pytest.skip(f"real tokenizer unavailable: {e}")
+    hf = tokenizer.get_tokenizer()
+
+    # Build a one-token-per-chunk stream by decoding each real token id back to text.
+    text = "The quick brown fox jumps over the lazy dog"
+    ids = hf.encode(text, add_special_tokens=False)
+    # transformers>=5.13 types decode() as str | list[str] because it also accepts batched
+    # ids; a flat list[int] is the single-sequence form and always decodes to one str.
+    chunk_texts = [cast(str, hf.decode([i])) for i in ids]
+    n = len(ids)
+
+    # Sanity: with the BOS the per-chunk sum is inflated by exactly one token per
+    # chunk (the bug); without it, it matches the whole-message count (the fix).
+    assert sum(tokenizer.count_tokens(c, add_special_tokens=True) for c in chunk_texts) == n + len(chunk_texts)
+    assert sum(tokenizer.count_tokens(c, add_special_tokens=False) for c in chunk_texts) == n
+
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(
+            output_tokens=n,  # whole-message count
+            response_chunks=[json.dumps({"choices": [{"text": t}]}) for t in chunk_texts],
+            chunk_times=[float(i + 1) for i in range(n)],  # 1s between tokens
+            server_usage={"completion_tokens": n},
+        ),
+    )
+    metric = RequestLifecycleMetric(scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None)
+
+    result = summarize_requests([metric], [50], tokenizer=tokenizer)
+
+    assert isinstance(metric.info.response_metrics, StreamedResponseMetrics)
+    # One timestamp per real token, not one-per-token-plus-a-BOS-per-chunk.
+    assert len(metric.info.response_metrics.output_token_times) == n
+
+    # ITL is now consistent with TPOT: both average 1.0s/token over the n-1 gaps.
+    itl_mean = result.successes["latency"]["inter_token_latency"]["mean"]
+    tpot_mean = result.successes["latency"]["time_per_output_token"]["mean"]
+    assert itl_mean == pytest.approx(1.0)
+    assert tpot_mean == pytest.approx(1.0)
+    # Client per-chunk count now agrees with the server's completion_tokens.
+    assert result.successes["token_count_mismatches"] == 0
+
+
+def test_summarize_requests_surfaces_output_token_usage() -> None:
+    """successes.output_tokens reports the server's completion_tokens, summed.
+
+    Mirrors the input-side prompt_tokens metric (PR #473): the exact server
+    count surfaced separately from the client-side output_len distribution.
+    """
+    metrics = []
+    # Values (0, 100) make every percentile p interpolate exactly to p, so the
+    # full default percentile list maps to a known dict.
+    for completion_tokens in (0, 100):
+        info = InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=10)),
+            response_metrics=StreamedResponseMetrics(
+                output_tokens=completion_tokens,
+                server_usage={"prompt_tokens": 10, "completion_tokens": completion_tokens},
+            ),
+        )
+        metrics.append(
+            RequestLifecycleMetric(scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None)
+        )
+
+    result = summarize_requests(metrics, DEFAULT_PERCENTILES)
+
+    expected = {"total": 100.0, "mean": 50.0, "min": 0.0, "max": 100.0}
+    for p in DEFAULT_PERCENTILES:
+        expected["median" if p == 50 else f"p{p:g}"] = float(p)
+    assert result.successes["output_tokens"] == pytest.approx(expected)
+
+
+def test_summarize_requests_token_usage_propagates_percentile_keys() -> None:
+    """The requested percentiles surface on both server-sourced token metrics.
+
+    output_tokens / prompt_tokens carry mean/min/max plus one key per
+    requested percentile (p50 -> 'median'), same as output_len. Locks in
+    that whatever percentile list the run passes feeds these metrics too.
+    """
+    metrics = []
+    for completion_tokens in range(1, 101):  # 1..100
+        info = InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=10)),
+            response_metrics=StreamedResponseMetrics(
+                output_tokens=completion_tokens,
+                server_usage={"prompt_tokens": 10, "completion_tokens": completion_tokens},
+            ),
+        )
+        metrics.append(
+            RequestLifecycleMetric(scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None)
+        )
+
+    result = summarize_requests(metrics, [0.1, 1, 5, 50, 90, 99, 99.9])
+
+    expected_keys = {"mean", "min", "max", "p0.1", "p1", "p5", "median", "p90", "p99", "p99.9"}
+    assert expected_keys <= result.successes["output_tokens"].keys()
+    assert expected_keys <= result.successes["prompt_tokens"].keys()
+    # p50 is keyed as 'median', never 'p50'.
+    assert "p50" not in result.successes["output_tokens"]
+    # Distribution keys mirror output_len exactly (same summarize() call).
+    assert result.successes["output_tokens"].keys() - {"total"} == result.successes["output_len"].keys()
+
+
+def test_summarize_requests_output_tokens_falls_back_to_client_count() -> None:
+    """Without server usage, output_tokens.total falls back to the client count."""
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=10)),
+        response_metrics=StreamedResponseMetrics(output_tokens=4),  # no server_usage
+    )
+    metric = RequestLifecycleMetric(scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None)
+
+    # Single value: every percentile collapses to it.
+    result = summarize_requests([metric], DEFAULT_PERCENTILES)
+
+    expected = {"total": 4.0, "mean": 4.0, "min": 4.0, "max": 4.0}
+    for p in DEFAULT_PERCENTILES:
+        expected["median" if p == 50 else f"p{p:g}"] = 4.0
+    assert result.successes["output_tokens"] == pytest.approx(expected)
+
+
+def test_output_len_not_recomputed_from_chunks() -> None:
+    """Regression for issue #564: output_len keeps the API layer's whole-message
+    output_tokens and is NOT re-derived by summing per-chunk re-tokenizations
+    (which inflate the count, e.g. a BOS added per chunk)."""
+    from unittest.mock import Mock
+
+    mock_tokenizer = Mock()
+    # Each chunk re-tokenizes to 2, so a per-chunk sum would be 4 (double).
+    mock_tokenizer.count_tokens.side_effect = lambda text, **kwargs: 2 if text else 0
+
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(
+            output_tokens=2,  # API layer's whole-message count
+            response_chunks=['{"choices": [{"text": "a"}]}', '{"choices": [{"text": "b"}]}'],
+            chunk_times=[1.0, 2.0],
+        ),
+    )
+    metric = RequestLifecycleMetric(scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None)
+
+    result = summarize_requests([metric], [50], tokenizer=mock_tokenizer)
+
+    # output_len stays the whole-message count (2), not the per-chunk sum (4).
+    assert result.successes["output_len"]["mean"] == pytest.approx(2.0)
+
+
+def test_summarize_requests_token_mismatch() -> None:
+    from unittest.mock import Mock
+
+    mock_tokenizer = Mock()
+    mock_tokenizer.count_tokens.side_effect = lambda text, **kwargs: 2 if "hello" in text else (3 if "world" in text else 0)
+
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(
+            response_chunks=[
+                '{"choices": [{"text": "hello"}]}',
+                '{"choices": [{"text": "world"}]}',
+            ],
+            chunk_times=[1.0, 2.0],
+            server_usage={"completion_tokens": 6},
+        ),
+    )
+
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="test_request", info=info, error=None
+    )
+
+    result = summarize_requests([metric], [50], tokenizer=mock_tokenizer)
+
+    assert result is not None
+    successes = result.successes
+    assert successes["token_count_mismatches"] == 1
+
+
+def test_use_server_output_tokens_flag_switches_tpot_ntpot_divisor() -> None:
+    """The flag normalizes TPOT/NTPOT by the server's completion_tokens instead of
+    the client re-tokenized count, while both raw counts stay reported."""
+
+    def make_metric() -> RequestLifecycleMetric:
+        info = InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+            response_metrics=StreamedResponseMetrics(
+                output_tokens=10,  # client re-tokenized count
+                output_token_times=[1.0, 3.0],  # duration 2.0s
+                server_usage={"completion_tokens": 5},  # exact server count
+            ),
+        )
+        return RequestLifecycleMetric(
+            scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None
+        )
+
+    # Default: divide by the client count (10).
+    default = summarize_requests([make_metric()], [50])
+    assert default.successes["latency"]["time_per_output_token"]["mean"] == pytest.approx(2.0 / 9.0)
+    assert default.successes["latency"]["normalized_time_per_output_token"]["mean"] == pytest.approx(10.0 / 10.0)
+
+    # Flag on: divide by the server count (5).
+    server = summarize_requests([make_metric()], [50], use_server_output_tokens=True)
+    assert server.successes["latency"]["time_per_output_token"]["mean"] == pytest.approx(2.0 / 4.0)
+    assert server.successes["latency"]["normalized_time_per_output_token"]["mean"] == pytest.approx(10.0 / 5.0)
+
+    # Both raw counts remain reported regardless of the flag: output_len is the
+    # client count, output_tokens is the server count (a single request, so its
+    # per-request distribution collapses to that count).
+    assert server.successes["output_len"]["mean"] == pytest.approx(10.0)
+    assert server.successes["output_tokens"] == pytest.approx(
+        {"total": 5.0, "mean": 5.0, "min": 5.0, "max": 5.0, "median": 5.0}
+    )
+
+
+def test_use_server_output_tokens_switches_output_throughput() -> None:
+    """The aggregate output/total tokens_per_sec honor the flag: server
+    completion_tokens when on, client re-tokenized output_tokens when off."""
+
+    def make_metric() -> RequestLifecycleMetric:
+        info = InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+            response_metrics=StreamedResponseMetrics(
+                output_tokens=10,  # client re-tokenized count
+                output_token_times=[1.0, 3.0],
+                server_usage={"completion_tokens": 5},  # exact server count
+            ),
+        )
+        return RequestLifecycleMetric(
+            scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None
+        )
+
+    # total_time = 10.0s (max end - min start).
+    default = summarize_requests([make_metric()], [50])
+    assert default.successes["throughput"]["output_tokens_per_sec"] == pytest.approx(10.0 / 10.0)
+    assert default.successes["throughput"]["total_tokens_per_sec"] == pytest.approx((5.0 + 10.0) / 10.0)
+
+    server = summarize_requests([make_metric()], [50], use_server_output_tokens=True)
+    assert server.successes["throughput"]["output_tokens_per_sec"] == pytest.approx(5.0 / 10.0)
+    assert server.successes["throughput"]["total_tokens_per_sec"] == pytest.approx((5.0 + 5.0) / 10.0)
+
+
+def test_use_server_output_tokens_works_for_non_streaming() -> None:
+    """The flag applies to unary (non-streaming) responses too: NTPOT and the
+    output throughput use the server's completion_tokens when it's available."""
+
+    def make_metric() -> RequestLifecycleMetric:
+        info = InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+            response_metrics=UnaryResponseMetrics(
+                output_tokens=10,  # client re-tokenized count
+                server_usage={"completion_tokens": 5},  # exact server count
+            ),
+        )
+        return RequestLifecycleMetric(
+            scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None
+        )
+
+    # NTPOT = (end - start) / output_tokens over all successful requests.
+    default = summarize_requests([make_metric()], [50])
+    assert default.successes["latency"]["normalized_time_per_output_token"]["mean"] == pytest.approx(10.0 / 10.0)
+    assert default.successes["throughput"]["output_tokens_per_sec"] == pytest.approx(10.0 / 10.0)
+
+    server = summarize_requests([make_metric()], [50], use_server_output_tokens=True)
+    assert server.successes["latency"]["normalized_time_per_output_token"]["mean"] == pytest.approx(10.0 / 5.0)
+    assert server.successes["throughput"]["output_tokens_per_sec"] == pytest.approx(5.0 / 10.0)
+
+
+def test_use_server_output_tokens_switches_goodput_token_total() -> None:
+    """Goodput's token_goodput counts server completion_tokens when the flag is on."""
+    from inference_perf.config.reportgen.config import GoodputConfig
+
+    def make_metric() -> RequestLifecycleMetric:
+        info = InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+            response_metrics=StreamedResponseMetrics(
+                output_tokens=10,  # client count
+                output_token_times=[1.0, 3.0],
+                server_usage={"completion_tokens": 5},  # server count
+            ),
+        )
+        return RequestLifecycleMetric(
+            scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None
+        )
+
+    # A lenient latency constraint keeps the single request "good"; benchmark
+    # window is 10s, so token_goodput == good_total_tokens / 10.
+    goodput_config = GoodputConfig(constraints={"request_latency": 100.0})
+
+    default = summarize_requests([make_metric()], [50], goodput_config=goodput_config)
+    assert default.successes["goodput_metrics"]["token_goodput"] == pytest.approx((5.0 + 10.0) / 10.0)
+
+    server = summarize_requests([make_metric()], [50], goodput_config=goodput_config, use_server_output_tokens=True)
+    assert server.successes["goodput_metrics"]["token_goodput"] == pytest.approx((5.0 + 5.0) / 10.0)
+
+
+def test_enrich_sessions_honors_use_server_output_tokens() -> None:
+    """Per-session total_output_tokens uses the server count when the flag is on."""
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(output_tokens=10, server_usage={"completion_tokens": 5}),
+    )
+    request_metric = RequestLifecycleMetric(
+        scheduled_time=0.0,
+        start_time=0.0,
+        end_time=10.0,
+        request_data="r",
+        info=info,
+        error=None,
+        session_id="s1",
+    )
+
+    def make_session() -> SessionLifecycleMetric:
+        return SessionLifecycleMetric(
+            session_id="s1",
+            stage_id=0,
+            file_path="s1.json",
+            start_time=0.0,
+            end_time=10.0,
+            duration_sec=10.0,
+            num_events=1,
+            num_events_completed=1,
+        )
+
+    # _enrich_sessions doesn't use `self`, so call it unbound with a dummy self.
+    default_session = make_session()
+    ReportGenerator._enrich_sessions(None, [default_session], [request_metric])  # type: ignore[arg-type]
+    assert default_session.total_output_tokens == 10
+
+    server_session = make_session()
+    ReportGenerator._enrich_sessions(None, [server_session], [request_metric], use_server_output_tokens=True)  # type: ignore[arg-type]
+    assert server_session.total_output_tokens == 5
+
+
+def _cached_request(session_id: str, input_tokens: int, server_usage: dict[str, Any] | None) -> RequestLifecycleMetric:
+    """A session request whose response optionally carries a server usage dict."""
+    return RequestLifecycleMetric(
+        scheduled_time=0.0,
+        start_time=0.0,
+        end_time=1.0,
+        request_data="r",
+        info=InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=input_tokens)),
+            response_metrics=StreamedResponseMetrics(output_tokens=1, server_usage=server_usage),
+        ),
+        error=None,
+        session_id=session_id,
+    )
+
+
+def _cache_session(session_id: str = "s1") -> SessionLifecycleMetric:
+    return SessionLifecycleMetric(
+        session_id=session_id,
+        stage_id=0,
+        file_path=f"{session_id}.json",
+        start_time=0.0,
+        end_time=1.0,
+        duration_sec=1.0,
+        num_events=1,
+        num_events_completed=1,
+    )
+
+
+def test_summarize_sessions_omits_retry_keys_when_nothing_retried() -> None:
+    """The session report gains no retry keys on a run that never retried.
+
+    Same contract as the request-level `retries` block: a default-config report must be
+    byte-identical to one produced before retries existed. Both readers in cli_summary
+    default to 0, so omission is safe rather than merely tidy.
+    """
+    summary = ReportGenerator.summarize_sessions(None, [_cache_session("s1")], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert "sessions_with_retries" not in summary
+    assert "total_retry_attempts" not in summary
+    assert "total_retries_recovered" not in summary
+
+
+def test_summarize_sessions_reports_retry_keys_when_something_retried() -> None:
+    """Once any session retried, all three keys appear -- including the zero-valued ones,
+    so the table's denominator is never silently missing."""
+    retried = _cache_session("s1")
+    retried.retries_attempted = 2
+    retried.retries_recovered = 0  # spent both attempts and failed anyway
+    quiet = _cache_session("s2")
+
+    summary = ReportGenerator.summarize_sessions(None, [retried, quiet], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["sessions_with_retries"] == 1
+    assert summary["total_retry_attempts"] == 2
+    assert summary["total_retries_recovered"] == 0
+
+
+def test_enrich_sessions_sums_cached_tokens_across_requests() -> None:
+    """total_cached_tokens sums prompt_tokens_details.cached_tokens over a session's requests."""
+    requests = [
+        _cached_request("s1", 20, {"prompt_tokens": 20, "prompt_tokens_details": {"cached_tokens": 0}}),
+        _cached_request("s1", 40, {"prompt_tokens": 40, "prompt_tokens_details": {"cached_tokens": 20}}),
+        _cached_request("s1", 39, {"prompt_tokens": 39, "prompt_tokens_details": {"cached_tokens": 12}}),
+    ]
+    session = _cache_session("s1")
+    ReportGenerator._enrich_sessions(None, [session], requests)  # type: ignore[arg-type]
+
+    assert session.total_input_tokens == 99
+    assert session.total_cached_tokens == 32  # 0 + 20 + 12
+    assert session.total_cacheable_input_tokens == 99  # server prompt_tokens: 20 + 40 + 39
+
+
+def test_enrich_sessions_cached_none_without_server_usage() -> None:
+    """No request reporting server usage leaves total_cached_tokens as None (not 0)."""
+    requests = [_cached_request("s1", 10, None), _cached_request("s1", 10, None)]
+    session = _cache_session("s1")
+    ReportGenerator._enrich_sessions(None, [session], requests)  # type: ignore[arg-type]
+
+    assert session.total_cached_tokens is None
+    assert session.total_cacheable_input_tokens is None
+    assert session.total_input_tokens == 20
+
+
+def test_enrich_sessions_cached_handles_null_prompt_tokens_details() -> None:
+    """server_usage present with prompt_tokens_details: null contributes nothing (see #664)."""
+    requests = [
+        _cached_request("s1", 10, {"prompt_tokens": 10, "prompt_tokens_details": None}),
+        _cached_request("s1", 10, {"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 4}}),
+    ]
+    session = _cache_session("s1")
+    ReportGenerator._enrich_sessions(None, [session], requests)  # type: ignore[arg-type]
+
+    # The null-details request reported no cache info at all, so it contributes to
+    # neither side of the ratio — only the request that did report is counted.
+    assert session.total_cached_tokens == 4
+    assert session.total_cacheable_input_tokens == 10
+
+
+def test_enrich_sessions_cache_denominator_uses_server_prompt_tokens() -> None:
+    """The hit-rate denominator is the server's prompt_tokens, not the client-side count.
+
+    Regression: the denominator was total_input_tokens (a client-side
+    re-tokenization). The client undercounts what the server actually prompts on
+    -- chat template and tool-schema overhead it does not model -- so pairing it
+    with the server-reported cached_tokens inflated the rate, here past 1.0.
+    """
+    # Client re-tokenizes 100 tokens; the server prompted on 120 and cached 110.
+    requests = [_cached_request("s1", 100, {"prompt_tokens": 120, "prompt_tokens_details": {"cached_tokens": 110}})]
+    session = _cache_session("s1")
+    ReportGenerator._enrich_sessions(None, [session], requests)  # type: ignore[arg-type]
+
+    assert session.total_input_tokens == 100  # client count, unchanged
+    assert session.total_cacheable_input_tokens == 120  # server count drives the ratio
+
+    summary = ReportGenerator.summarize_sessions(None, [session], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+    assert summary["kv_cache_hit_per_session_percent"]["mean"] == pytest.approx(100.0 * 110 / 120)
+    assert summary["kv_cache_hit_per_session_percent"]["max"] <= 100.0
+
+
+def test_enrich_sessions_cache_matches_stage_level_prompt_token_usage() -> None:
+    """Per-session hit rate agrees with the stage-level prompt_token_usage split.
+
+    Post-#678, input_tokens is resolved to the server value at construction time,
+    so the fixture passes the server count as input_tokens (the single source of truth).
+    """
+    server = [1000, 2000, 3000, 4000, 5000]
+    cached = [0, 900, 1900, 2900, 3900]
+    requests = [
+        _cached_request("s1", s, {"prompt_tokens": s, "prompt_tokens_details": {"cached_tokens": k}})
+        for s, k in zip(server, cached, strict=True)
+    ]
+    session = _cache_session("s1")
+    ReportGenerator._enrich_sessions(None, [session], requests)  # type: ignore[arg-type]
+
+    stage = summarize_prompt_token_usage(requests, DEFAULT_PERCENTILES)
+    summary = ReportGenerator.summarize_sessions(None, [session], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["kv_cache_hit_percent"] == pytest.approx(100.0 * stage["cached"] / stage["total"])
+
+
+def test_enrich_sessions_cache_clamps_cached_above_prompt_tokens() -> None:
+    """A cached count exceeding prompt_tokens is clamped instead of yielding a rate > 1."""
+    requests = [_cached_request("s1", 100, {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 150}})]
+    session = _cache_session("s1")
+    ReportGenerator._enrich_sessions(None, [session], requests)  # type: ignore[arg-type]
+
+    assert session.total_cached_tokens == 100
+
+    summary = ReportGenerator.summarize_sessions(None, [session], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+    assert summary["kv_cache_hit_per_session_percent"]["max"] == pytest.approx(100.0)
+
+
+def test_summarize_sessions_reports_kv_cache_hit_rate() -> None:
+    """summarize_sessions emits per-session cached totals and the cached/prompt ratio."""
+    with_cache = _cache_session("s1")
+    with_cache.total_input_tokens = 99
+    with_cache.total_cached_tokens = 32  # golden shape from a real qwen32 run
+    with_cache.total_cacheable_input_tokens = 99
+
+    no_cache = _cache_session("s2")
+    no_cache.total_input_tokens = 50
+    no_cache.total_cached_tokens = None  # no server usage — excluded from the ratio
+    no_cache.total_cacheable_input_tokens = None
+
+    # summarize_sessions doesn't use `self`, so call it unbound with a dummy self.
+    summary = ReportGenerator.summarize_sessions(None, [with_cache, no_cache], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["total_cached_tokens"]["mean"] == pytest.approx(32.0)
+    # Only s1 contributes: 32/99. s2 (None) is skipped, not treated as 0.
+    assert summary["kv_cache_hit_per_session_percent"]["mean"] == pytest.approx(100.0 * 32.0 / 99.0)
+    assert summary["sessions_with_cache_info"] == 1
+
+
+def test_summarize_sessions_kv_cache_hit_rate_none_when_no_cache_info() -> None:
+    """With no session reporting cache info, the ratio summary is None, not a crash."""
+    s = _cache_session("s1")
+    s.total_input_tokens = 30
+    s.total_cached_tokens = None
+
+    summary = ReportGenerator.summarize_sessions(None, [s], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["kv_cache_hit_percent"] is None
+    assert summary["kv_cache_hit_per_session_percent"] is None
+    assert summary["total_cached_tokens"] is None
+    assert summary["sessions_with_cache_info"] == 0
+
+
+def test_summarize_sessions_kv_cache_hit_rate_zero_when_all_zero() -> None:
+    """All-zero cached readings keep the reported 0% (see #818).
+
+    Explicit zeros are ambiguous (genuinely cold cache, or usage counters
+    normalized by a gateway/sidecar), but the number itself is kept as the
+    server sent it; the ambiguity is surfaced by the session validator as a
+    validation.json warning instead.
+    """
+    s1 = _cache_session("s1")
+    s1.total_cached_tokens = 0
+    s1.total_cacheable_input_tokens = 100
+    s2 = _cache_session("s2")
+    s2.total_cached_tokens = 0
+    s2.total_cacheable_input_tokens = 200
+
+    summary = ReportGenerator.summarize_sessions(None, [s1, s2], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["kv_cache_hit_percent"] == pytest.approx(0.0)
+    assert summary["kv_cache_hit_per_session_percent"]["mean"] == pytest.approx(0.0)
+    assert summary["sessions_with_cache_info"] == 2
+
+
+def test_summarize_sessions_kv_cache_hit_rate_kept_when_partially_zero() -> None:
+    """A mix of zero and nonzero sessions still reports a real rate."""
+    cold = _cache_session("cold")
+    cold.total_cached_tokens, cold.total_cacheable_input_tokens = 0, 100
+    warm = _cache_session("warm")
+    warm.total_cached_tokens, warm.total_cacheable_input_tokens = 50, 100
+
+    summary = ReportGenerator.summarize_sessions(None, [cold, warm], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["kv_cache_hit_percent"] == pytest.approx(100.0 * 50 / 200)
+    assert summary["kv_cache_hit_per_session_percent"]["mean"] == pytest.approx(25.0)
+    assert summary["sessions_with_cache_info"] == 2
+
+
+def test_summarize_sessions_kv_cache_aggregate_is_token_weighted() -> None:
+    """The aggregate rate weights sessions by tokens; the percentile mean does not.
+
+    A tiny fully-cached session and a huge uncached one average to 50% as a
+    mean-of-ratios, which misreads a run that cached ~0.1% of its tokens.
+    """
+    small = _cache_session("small")
+    small.total_cached_tokens, small.total_cacheable_input_tokens = 10, 10
+
+    large = _cache_session("large")
+    large.total_cached_tokens, large.total_cacheable_input_tokens = 0, 10000
+
+    summary = ReportGenerator.summarize_sessions(None, [small, large], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["kv_cache_hit_per_session_percent"]["mean"] == pytest.approx(50.0)  # mean of ratios
+    assert summary["kv_cache_hit_percent"] == pytest.approx(100.0 * 10 / 10010)  # token-weighted
+
+
+def test_use_server_output_tokens_falls_back_without_usage() -> None:
+    """With the flag on but no server usage, normalization uses the client count."""
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(output_tokens=10, output_token_times=[1.0, 3.0]),  # no server_usage
+    )
+    metric = RequestLifecycleMetric(scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="r", info=info, error=None)
+
+    result = summarize_requests([metric], [50], use_server_output_tokens=True)
+
+    assert result.successes["latency"]["time_per_output_token"]["mean"] == pytest.approx(2.0 / 9.0)
+
+
+def test_summarize_requests_surfaces_prompt_cache_usage() -> None:
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=10)),
+        response_metrics=StreamedResponseMetrics(
+            output_tokens=2,
+            server_usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 6},
+            },
+        ),
+    )
+
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="test_request", info=info, error=None
+    )
+
+    # Single value: every percentile collapses to it.
+    result = summarize_requests([metric], DEFAULT_PERCENTILES)
+
+    expected = {"total": 10.0, "cached": 6.0, "uncached": 4.0, "mean": 10.0, "min": 10.0, "max": 10.0}
+    for p in DEFAULT_PERCENTILES:
+        expected["median" if p == 50 else f"p{p:g}"] = 10.0
+    assert result.successes["prompt_tokens"] == pytest.approx(expected)
+
+
+def test_summarize_requests_handles_null_prompt_tokens_details() -> None:
+    """Servers that report `prompt_tokens_details: null` must not crash."""
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=10)),
+        response_metrics=UnaryResponseMetrics(
+            output_tokens=2,
+            server_usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "prompt_tokens_details": None,
+            },
+        ),
+    )
+
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="test_request", info=info, error=None
+    )
+
+    result = summarize_requests([metric], DEFAULT_PERCENTILES)
+
+    prompt_tokens = result.successes["prompt_tokens"]
+    assert prompt_tokens["total"] == pytest.approx(10.0)
+    assert prompt_tokens["cached"] == pytest.approx(0.0)
+    assert prompt_tokens["uncached"] == pytest.approx(10.0)
+
+
+def test_extract_chunk_text_variations() -> None:
+    from inference_perf.reportgen.base import _extract_chunk_text
+
+    # 1. Compact chat completion delta content (vLLM / SGLang style)
+    c1 = '{"choices":[{"index":0,"delta":{"content":"Hello world"}}]}'
+    assert _extract_chunk_text(c1) == "Hello world"
+
+    # 2. Spaced chat completion delta content
+    c2 = '{"id": "chat-1", "choices": [{"index": 0, "delta": {"content": "Hello spaced"}}]}'
+    assert _extract_chunk_text(c2) == "Hello spaced"
+
+    # 3. Text completion delta text
+    c3 = '{"choices": [{"text": "completion text"}]}'
+    assert _extract_chunk_text(c3) == "completion text"
+
+    # 4. Escaped content with newlines/quotes
+    c4 = '{"choices": [{"delta": {"content": "line1\\nline2"}}]}'
+    assert _extract_chunk_text(c4) == "line1\nline2"
+
+    # 5. Anthropic style text_delta
+    c5 = '{"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Anthropic chunk"}}'
+    assert _extract_chunk_text(c5) == "Anthropic chunk"
+
+    # 6. Non-content / role-only / usage chunk
+    c6 = '{"choices": [{"delta": {"role": "assistant"}}]}'
+    assert _extract_chunk_text(c6) is None
+
+    # 7. Malformed JSON
+    c7 = '{"choices": [{"delta": '
+    assert _extract_chunk_text(c7) is None
+
+
+def test_correct_streamed_response_metrics_caching_and_vectorization() -> None:
+    from unittest.mock import MagicMock
+    from inference_perf.reportgen.base import correct_streamed_response_metrics
+
+    # Setup 4 chunks: 2 identical tokens, 1 multi-token, 1 empty
+    chunks = [
+        '{"choices": [{"delta": {"content": "token"}}]}',
+        '{"choices": [{"delta": {"content": "token"}}]}',
+        '{"choices": [{"delta": {"content": "multi token"}}]}',
+        '{"choices": [{"delta": {"role": "assistant"}}]}',
+    ]
+    chunk_times = [1.0, 2.0, 3.0, 4.0]
+
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=10)),
+        response_metrics=StreamedResponseMetrics(
+            output_tokens=4,
+            output_token_times=[],
+            response_chunks=chunks,
+            chunk_times=chunk_times,
+            server_usage={"completion_tokens": 4},
+        ),
+    )
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="req", info=info, error=None
+    )
+
+    tokenizer = MagicMock()
+
+    # "token" -> 1 token, "multi token" -> 2 tokens
+    def mock_count(text: str, **kwargs: Any) -> int:
+        return 2 if "multi" in text else 1
+
+    tokenizer.count_tokens = MagicMock(side_effect=mock_count)
+
+    # Discrepancy returns False because accumulated (1 + 1 + 2 = 4) == server completion_tokens (4)
+    has_discrepancy = correct_streamed_response_metrics(metric, tokenizer)
+    assert not has_discrepancy
+
+    # Verify timestamps: 1 at t=1.0, 1 at t=2.0, 2 at t=3.0
+    assert isinstance(info.response_metrics, StreamedResponseMetrics)
+    assert info.response_metrics.output_token_times == [1.0, 2.0, 3.0, 3.0]
+
+    # Verify token cache on tokenizer was populated and reused for the duplicate "token" chunk
+    token_cache = getattr(tokenizer, "_count_tokens_cache", None)
+    assert token_cache is not None
+    assert token_cache["token"] == 1
+    assert token_cache["multi token"] == 2
+    # count_tokens should have been called only twice despite 3 content chunks
+    assert tokenizer.count_tokens.call_count == 2
+
+
+def test_correct_streamed_response_metrics_anthropic_calculates_ttft_tpot_itl() -> None:
+    from unittest.mock import MagicMock
+    from inference_perf.reportgen.base import compute_request_latency_metrics, correct_streamed_response_metrics
+
+    # Anthropic SSE content_block_delta chunks (no "choices" key)
+    chunks = [
+        '{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}',
+        '{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": " world"}}',
+        '{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "!"}}',
+    ]
+    chunk_times = [1.0, 2.0, 3.5]
+
+    info = InferenceInfo(
+        request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+        response_metrics=StreamedResponseMetrics(
+            output_tokens=3,
+            output_token_times=[],
+            response_chunks=chunks,
+            chunk_times=chunk_times,
+            server_usage={"completion_tokens": 3},
+        ),
+    )
+    metric = RequestLifecycleMetric(
+        scheduled_time=0.0, start_time=0.5, end_time=4.0, request_data="req", info=info, error=None
+    )
+
+    tokenizer = MagicMock()
+    tokenizer.count_tokens = MagicMock(return_value=1)
+
+    correct_streamed_response_metrics(metric, tokenizer)
+
+    assert isinstance(info.response_metrics, StreamedResponseMetrics)
+    assert info.response_metrics.output_token_times == [1.0, 2.0, 3.5]
+
+    metrics = compute_request_latency_metrics(metric)
+    assert metrics["time_to_first_token"] == pytest.approx(0.5)  # 1.0 - 0.5
+    assert metrics["time_per_output_token"] == pytest.approx(1.25)  # (3.5 - 1.0) / (3 - 1)
+    assert metrics["inter_token_latency"] == pytest.approx(1.25)  # mean([1.0, 1.5])
+    assert metrics["inter_token_latency_deltas"] == [pytest.approx(1.0), pytest.approx(1.5)]
+
+
+def test_ntpot_is_unset_for_requests_without_output_tokens() -> None:
+    """NTPOT divides latency by output tokens, so it does not apply to a request
+    that generated none (e.g. embeddings). Such a request must be left out of the
+    NTPOT summary instead of adding a fabricated 0.0 that drags the mean down."""
+
+    def make_metric(output_tokens: int, latency: float) -> RequestLifecycleMetric:
+        info = InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+            response_metrics=UnaryResponseMetrics(output_tokens=output_tokens),
+        )
+        return RequestLifecycleMetric(
+            scheduled_time=0.0, start_time=0.0, end_time=latency, request_data="r", info=info, error=None
+        )
+
+    no_output = make_metric(output_tokens=0, latency=4.0)
+    assert compute_request_latency_metrics(no_output)["normalized_time_per_output_token"] is None
+
+    mixed = summarize_requests([make_metric(output_tokens=10, latency=10.0), no_output], [50])
+    assert mixed.successes["latency"]["normalized_time_per_output_token"]["mean"] == pytest.approx(1.0)
+
+    only_no_output = summarize_requests([no_output], [50])
+    assert only_no_output.successes["latency"]["normalized_time_per_output_token"] is None
+
+
+def test_extract_chunk_text_reads_content_block_start_text() -> None:
+    """A compatible server may put text in content_block_start; it must count (#885)."""
+    from inference_perf.reportgen.base import _extract_chunk_text
+
+    chunk = '{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "Hello start"}}'
+    assert _extract_chunk_text(chunk) == "Hello start"
+
+    # Empty text there carries nothing, matching the live Anthropic parser.
+    empty = '{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}'
+    assert _extract_chunk_text(empty) is None
+
+
+def test_correct_streamed_response_metrics_reads_anthropic_output_tokens() -> None:
+    """Mismatch detection must read output_tokens, not just completion_tokens (#885)."""
+    from unittest.mock import MagicMock
+    from inference_perf.reportgen.base import correct_streamed_response_metrics
+
+    chunks = [
+        '{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}',
+        '{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": " world"}}',
+    ]
+    chunk_times = [1.0, 2.0]
+
+    def make_metric(server_usage: dict[str, Any]) -> RequestLifecycleMetric:
+        info = InferenceInfo(
+            request_metrics=RequestMetrics(text=Text(input_tokens=5)),
+            response_metrics=StreamedResponseMetrics(
+                output_tokens=2,
+                output_token_times=[],
+                response_chunks=chunks,
+                chunk_times=chunk_times,
+                server_usage=server_usage,
+            ),
+        )
+        return RequestLifecycleMetric(
+            scheduled_time=0.0, start_time=0.0, end_time=3.0, request_data="req", info=info, error=None
+        )
+
+    tokenizer = MagicMock()
+    tokenizer.count_tokens = MagicMock(return_value=1)
+
+    # Server says 2, client re-tokenized 2 -> no mismatch.
+    assert correct_streamed_response_metrics(make_metric({"output_tokens": 2}), tokenizer) is False
+    # Server says 5, client re-tokenized 2 -> mismatch must be reported.
+    assert correct_streamed_response_metrics(make_metric({"output_tokens": 5}), tokenizer) is True
+
+
+# --- truncated sessions (stage duration boundary) ------------------------
+
+
+def _truncated_session(session_id: str = "cut", num_events: int = 5, num_events_completed: int = 2) -> SessionLifecycleMetric:
+    """A session cut short at the stage boundary: fewer events done than the graph holds."""
+    return SessionLifecycleMetric(
+        session_id=session_id,
+        stage_id=0,
+        file_path=f"{session_id}.json",
+        start_time=0.0,
+        end_time=7.0,
+        duration_sec=7.0,
+        num_events=num_events,
+        num_events_completed=num_events_completed,
+        truncated=True,
+    )
+
+
+def test_enrich_sessions_truncated_is_neither_success_nor_failure() -> None:
+    """A truncated session gets success=None so it is not counted as a server failure.
+
+    Its events are incomplete by construction (the stage boundary stopped it), so the
+    normal `num_events_completed == num_events` rule would report it as FAILED.
+    """
+    truncated = _truncated_session()
+    ReportGenerator._enrich_sessions(None, [truncated], [])  # type: ignore[arg-type]
+
+    assert truncated.success is None
+
+    summary = ReportGenerator.summarize_sessions(None, [truncated], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+    assert summary["num_sessions"] == 1
+    assert summary["num_sessions_succeeded"] == 0
+    assert summary["num_sessions_failed"] == 0
+    assert summary["num_sessions_not_completed_active"] == 1
+
+
+def test_enrich_sessions_untruncated_still_fails_on_incomplete_events() -> None:
+    """The truncated guard must not mask a genuinely incomplete session."""
+    incomplete = _truncated_session(session_id="broken")
+    incomplete.truncated = False
+    ReportGenerator._enrich_sessions(None, [incomplete], [])  # type: ignore[arg-type]
+
+    assert incomplete.success is False
+
+
+def test_summarize_sessions_excludes_truncated_from_duration_percentiles() -> None:
+    """Truncated durations are censored, so they must not enter session_duration_sec.
+
+    A session stopped at the boundary ran *at least* that long; counting it as if it
+    finished drags every percentile down.
+    """
+    complete = _cache_session("done")
+    complete.duration_sec = 100.0
+    cut = _truncated_session("cut")
+    cut.duration_sec = 7.0
+
+    ReportGenerator._enrich_sessions(None, [complete, cut], [])  # type: ignore[arg-type]
+    summary = ReportGenerator.summarize_sessions(None, [complete, cut], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    # Only the completed session's 100s contributes.
+    assert summary["session_duration_sec"]["mean"] == pytest.approx(100.0)
+    assert summary["session_duration_sec"]["max"] == pytest.approx(100.0)
+    assert summary["num_sessions_not_completed_active"] == 1
+
+
+def test_summarize_sessions_all_truncated_gives_null_duration_not_crash() -> None:
+    """A stage where every session was cut short reports None, not an exception."""
+    sessions = [_truncated_session("a"), _truncated_session("b")]
+    ReportGenerator._enrich_sessions(None, sessions, [])  # type: ignore[arg-type]
+
+    summary = ReportGenerator.summarize_sessions(None, sessions, [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["session_duration_sec"] is None
+    assert summary["num_sessions_not_completed_active"] == 2
+
+
+def test_summarize_sessions_truncated_events_still_counted() -> None:
+    """Event aggregates stay inclusive: a truncated session's completed events are real."""
+    cut = _truncated_session("cut", num_events=5, num_events_completed=2)
+    ReportGenerator._enrich_sessions(None, [cut], [])  # type: ignore[arg-type]
+
+    summary = ReportGenerator.summarize_sessions(None, [cut], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["total_events"] == 5
+    assert summary["total_events_completed"] == 2
+
+
+def test_summarize_sessions_truncated_defaults_to_zero() -> None:
+    """Runs with no truncation report 0, so the key is always present in the report."""
+    summary = ReportGenerator.summarize_sessions(None, [_cache_session("s1")], [], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+    assert summary["num_sessions_not_completed_active"] == 0
+
+
+def test_summarize_sessions_does_not_double_count_stranded_sessions() -> None:
+    """A truncated row and the stage's stranded-active counter are the same session.
+
+    #786 derives ``num_sessions`` as ``len(metrics) + not_completed``, which is correct
+    only while a stranded session has no lifecycle row -- on main, loadgen builds one
+    solely for sessions that finished. A duration-bounded stage records the stragglers
+    too, so adding the counter on top counts each of them twice: a 10-session stage where
+    6 finished and 4 were cut short would report 14 sessions, and claim all 10 completed.
+    """
+    sessions = [_cache_session(f"done{i}") for i in range(6)]
+    sessions += [_truncated_session(f"cut{i}") for i in range(4)]
+    stage_info = StageRuntimeInfo(
+        stage_id=0,
+        rate=0.0,
+        start_time=0.0,
+        end_time=150.0,
+        status=StageStatus.COMPLETED,
+        sessions_not_completed_active=4,
+        sessions_not_completed_pending=0,
+    )
+
+    ReportGenerator._enrich_sessions(None, sessions, [])  # type: ignore[arg-type]
+    summary = ReportGenerator.summarize_sessions(None, sessions, [stage_info], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    assert summary["num_sessions"] == 10, "every session counted exactly once"
+    assert summary["num_sessions_completed"] == 6
+    assert summary["num_sessions_not_completed"] == 4
+    assert summary["num_sessions_not_completed_active"] == 4
+
+
+def test_summarize_sessions_counts_never_dispatched_sessions_separately() -> None:
+    """A session that never started has no row, so the stage counter is its only record.
+
+    It must still reach num_sessions: dropping it would under-report the stage, which is
+    the visibility gap #786 set out to close.
+    """
+    stage_info = StageRuntimeInfo(
+        stage_id=0,
+        rate=0.0,
+        start_time=0.0,
+        end_time=150.0,
+        status=StageStatus.COMPLETED,
+        sessions_not_completed_active=1,
+        sessions_not_completed_pending=3,
+    )
+    sessions = [_cache_session("done"), _truncated_session("cut")]
+
+    ReportGenerator._enrich_sessions(None, sessions, [])  # type: ignore[arg-type]
+    summary = ReportGenerator.summarize_sessions(None, sessions, [stage_info], DEFAULT_PERCENTILES)  # type: ignore[arg-type]
+
+    # 1 completed + 1 truncated row + 3 never dispatched.
+    assert summary["num_sessions"] == 5
+    assert summary["num_sessions_completed"] == 1
+    assert summary["num_sessions_not_completed_active"] == 1
+    assert summary["num_sessions_not_completed_pending"] == 3

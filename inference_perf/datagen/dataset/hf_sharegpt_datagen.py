@@ -1,0 +1,238 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import io
+import ijson
+import logging
+from inference_perf.apis import (
+    AnthropicMessagesAPIData,
+    ChatCompletionAPIData,
+    ChatMessage,
+    CompletionAPIData,
+    InferenceAPIData,
+)
+from inference_perf.utils.custom_tokenizer import CustomTokenizer
+from inference_perf.utils.dataset import load_dataset_with_deadline
+from ..base import DataGenerator
+from inference_perf.config import APIConfig, APIType, DataConfig
+from typing import Any, Dict, Generator, Iterator, List, Optional
+from huggingface_hub import hf_hub_download
+import os
+import json
+
+logger = logging.getLogger(__name__)
+
+SHAREGPT_HF_DATASET_URL = "anon8231489123/ShareGPT_Vicuna_unfiltered"
+SHAREGPT_HF_DATAFILES_PATH = "ShareGPT_V3_unfiltered_cleaned_split.json"
+SHAREGPT_HF_CHAT_ROLE_MAP = {"human": "user", "gpt": "assistant"}
+
+
+class HFShareGPTDataGenerator(DataGenerator):
+    def __init__(self, api_config: APIConfig, config: DataConfig, tokenizer: Optional[CustomTokenizer]) -> None:
+        super().__init__(api_config, config, tokenizer)
+
+        self.min_num_turns = 2
+        self.data_key = "conversations"
+        self.role_key = "from"
+        self.content_key = "value"
+        self.sharegpt_dataset = self._load_dataset()
+        self._dataset_ready = True
+
+    def _load_dataset(self) -> Iterator[Any]:
+        def load_and_prime() -> Iterator[Any]:
+            dataset = self._open_dataset()
+            # Keep both the Hub download and first parsed row inside the deadline.
+            next(dataset)
+            return dataset
+
+        if self.config.path is not None:
+            return load_and_prime()
+        return load_dataset_with_deadline(load_and_prime, SHAREGPT_HF_DATASET_URL, self.config.load_timeout)
+
+    def _open_dataset(self) -> Iterator[Any]:
+        config = self.config
+        if config.path is not None:
+            # check if the path is valid
+            if not os.path.exists(config.path):
+                raise ValueError(f"Invalid dataset path: {config.path}. Path does not exist.")
+            # depending on whether the dataset is a single file or a directory, we need to load it differently
+            # TODO: add support for other file types
+            if os.path.isfile(config.path) and config.path.endswith(".json"):
+                paths = [config.path]
+            elif os.path.isdir(config.path):
+                paths = [os.path.join(config.path, f) for f in os.listdir(config.path) if f.endswith(".json")]
+            else:
+                raise ValueError(f"Invalid dataset path: {config.path}")
+        else:
+            paths = [
+                hf_hub_download(
+                    repo_id=SHAREGPT_HF_DATASET_URL,
+                    filename=SHAREGPT_HF_DATAFILES_PATH,
+                    repo_type="dataset",
+                )
+            ]
+        return self._repeat_dataset(paths)
+
+    def _repeat_dataset(self, paths: List[str]) -> Iterator[Any]:
+        while True:
+            has_rows = False
+            for path in paths:
+                # Reopen the local or cached file instead of retaining rows in cycle.
+                # No network reads remain while requests are generated between stages.
+                with open(path, "rb", buffering=0) as source, io.BufferedReader(source) as stream:
+                    # Local .json files can also contain JSON Lines. Peek through
+                    # leading whitespace without consuming the first JSON token.
+                    while (first := stream.peek(1)[:1]) and first in b" \t\r\n":
+                        stream.read(1)
+                    is_array = first == b"["
+                    for row in ijson.items(stream, "item" if is_array else "", multiple_values=not is_array):
+                        has_rows = True
+                        yield row
+            if not has_rows:
+                raise ValueError("ShareGPT dataset contains no records")
+
+    def __getstate__(self) -> Dict[str, Any]:
+        # The streaming iterator is unpicklable, so a spawn/forkserver worker
+        # fails to unpickle the whole generator (#589). Drop it here; __setstate__ leaves
+        # it unloaded, and _ensure_dataset_loaded() rebuilds it lazily the first
+        # time get_data() actually needs it in this process.
+        state = self.__dict__.copy()
+        del state["sharegpt_dataset"]
+        state["_dataset_ready"] = False
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+
+    def _ensure_dataset_loaded(self) -> None:
+        # A Worker process only reaches its own copy of this generator through
+        # LazyLoadDataMixin.get_request(), which is a no-op for a generator
+        # (like this one) that doesn't implement that mixin: the parent process
+        # is the one that calls get_data() and puts the materialized requests on
+        # the queue. So a worker's copy never needs the dataset at all, and
+        # rebuilding it eagerly on every worker spawn (as __setstate__ used to)
+        # cost every worker a redundant dataset open, network round trip
+        # included for the default Hub dataset, for nothing.
+        if not self._dataset_ready:
+            self.sharegpt_dataset = self._load_dataset()
+            self._dataset_ready = True
+
+    def get_supported_apis(self) -> List[APIType]:
+        return [APIType.Chat, APIType.Completion, APIType.AnthropicMessages]
+
+    def get_data(self) -> Generator[InferenceAPIData, None, None]:
+        self._ensure_dataset_loaded()
+        if self.api_config.type == APIType.Completion:
+            yield from self.get_completion_data()
+            return
+        if self.api_config.type == APIType.Chat:
+            yield from self.get_chat_data()
+            return
+        if self.api_config.type == APIType.AnthropicMessages:
+            yield from self.get_anthropic_messages_data()
+            return
+        raise Exception("Unsupported API type")
+
+    def get_completion_data(self) -> Generator[InferenceAPIData, None, None]:
+        if self.tokenizer is None:
+            raise Exception("Tokenizer is required for completion API of HFShareGPTDataGenerator")
+        while True:
+            data = next(self.sharegpt_dataset)
+            if (
+                data is None
+                or data.get(self.data_key) is None
+                or len(data[self.data_key]) < self.min_num_turns
+                or len(data[self.data_key]) == 0
+            ):
+                continue
+
+            try:
+                prompt = self.get_conversation_turn_content(data, 0)
+                completion = self.get_conversation_turn_content(data, 1)
+                if not prompt:
+                    continue
+                prompt_ids = self.tokenizer.get_tokenizer().encode(prompt)
+                prompt_tokens = len(prompt_ids)
+                completion_tokens = self.tokenizer.count_tokens(completion)
+
+                if self.input_distribution:
+                    if prompt_tokens < self.input_distribution.min:
+                        continue
+                    if prompt_tokens > self.input_distribution.max:
+                        continue
+                if self.output_distribution:
+                    if completion_tokens < self.output_distribution.min:
+                        continue
+                    if completion_tokens > self.output_distribution.max:
+                        continue
+
+                yield CompletionAPIData(prompt=prompt, max_tokens=completion_tokens)
+
+            except (KeyError, TypeError) as e:
+                logger.warning(f"Skipping invalid completion data: {e}")
+                continue
+
+    def get_conversation_turn_content(self, data: Any, turn: int) -> str:
+        conversation = data[self.data_key][turn]
+        if isinstance(conversation, dict):
+            pass
+        elif isinstance(conversation, str):
+            # https://github.com/kubernetes-sigs/inference-perf/issues/429:
+            # The dataset sometimes contains a string containing a JSON
+            # object rather than the object itself for some reason.
+            conversation = json.loads(conversation)
+            assert isinstance(conversation, dict)
+        else:
+            raise Exception(f"Conversation from upstream gave unsupported type: {type(conversation).__name__}")
+
+        s = conversation.get(self.content_key)
+        assert isinstance(s, str)
+        return s
+
+    def get_chat_data(self) -> Generator[InferenceAPIData, None, None]:
+        if self.tokenizer is None:
+            raise Exception("Tokenizer is required for chat API of HFShareGPTDataGenerator")
+
+        while True:
+            data = next(self.sharegpt_dataset)
+            if (
+                data is None
+                or data.get(self.data_key) is None
+                or len(data[self.data_key]) < self.min_num_turns
+                or len(data[self.data_key]) == 0
+            ):
+                continue
+
+            messages = []
+            for conversation in data[self.data_key]:
+                role = SHAREGPT_HF_CHAT_ROLE_MAP.get(conversation[self.role_key], "user")
+                content = conversation[self.content_key]
+                messages.append(ChatMessage(role=role, content=content))
+
+            yield ChatCompletionAPIData(messages=messages)
+
+    def get_anthropic_messages_data(self) -> Generator[InferenceAPIData, None, None]:
+        if self.tokenizer is None:
+            raise Exception("Tokenizer is required for Anthropic Messages API of HFShareGPTDataGenerator")
+
+        for data in self.get_chat_data():
+            if isinstance(data, ChatCompletionAPIData):
+                yield AnthropicMessagesAPIData(messages=data.messages, max_tokens=data.max_tokens)
+            else:
+                raise Exception(f"Expected ChatCompletionAPIData, got {type(data).__name__}")
+
+    def is_io_distribution_supported(self) -> bool:
+        return True
+
+    def is_shared_prefix_supported(self) -> bool:
+        return False

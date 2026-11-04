@@ -11,10 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import heapq
 import logging
 import json
+import re
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union, TYPE_CHECKING
 from inference_perf.utils.custom_tokenizer import CustomTokenizer
 
 if TYPE_CHECKING:
@@ -22,24 +24,165 @@ if TYPE_CHECKING:
 
 
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, model_serializer
 
-from inference_perf.apis import RequestLifecycleMetric, SessionLifecycleMetric, StreamedInferenceResponseInfo
-from inference_perf.client.metricsclient import MetricsClient, PerfRuntimeParameters
-from inference_perf.client.metricsclient.base import ModelServerMetrics
-from inference_perf.client.metricsclient.prometheus_client import PrometheusMetricsClient
-from inference_perf.client.requestdatacollector import RequestDataCollector
+from inference_perf.apis import RequestLifecycleMetric, ResponseMetrics, SessionLifecycleMetric, StreamedResponseMetrics
+from inference_perf.apis.chat import reasoning_field
+from inference_perf.client.server_metrics import ServerMetricsClient, PerfRuntimeParameters
+from inference_perf.client.server_metrics.base import ModelServerMetrics, StageRuntimeInfo, StageStatus
+from inference_perf.client.server_metrics.prometheus_client import PrometheusMetricsClient
+from inference_perf.metrics.request_collector import RequestMetricCollector
 from inference_perf.config import (
     Config,
     PrometheusMetricsReportConfig,
     ReportConfig,
     SessionLifecycleReportConfig,
     GoodputConfig,
+    PerRequestFieldsConfig,
 )
+from inference_perf.config.redaction import redact
 from inference_perf.metrics import SessionMetricsCollector
 from inference_perf.utils import ReportFile
 
 logger = logging.getLogger(__name__)
+
+# Report label for each terminal StageStatus; anything not listed (FAILED, RUNNING,
+# SKIPPED) reads as "FAILED" in the report.
+_STAGE_STATUS_LABELS: Dict[StageStatus, str] = {
+    StageStatus.COMPLETED: "COMPLETED",
+    StageStatus.TIMED_OUT: "TIMED_OUT",
+    StageStatus.INTERRUPTED: "INTERRUPTED",
+}
+
+# Labels derived purely from the HTTP status code. These are authoritative: the
+# code comes from response.status, not from free-text, so a 400 can never be
+# mislabeled as "Internal Server Error" because its message happens to contain
+# "500". Code-specific semantics belong here, NOT in _HTTP_ERROR_LABELS.
+_HTTP_CODE_LABELS: dict[str, str] = {
+    "429": "Rate Limit",
+    "500": "Internal Server Error",
+    "502": "Bad Gateway",
+    "503": "Service Unavailable",
+    "504": "Gateway Timeout",
+}
+
+# Labels inferred from the error message body. Only include semantics that the
+# status code alone does NOT determine.
+_HTTP_ERROR_LABELS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"context.window|context length|maximum context|max.?tokens|token.?limit", re.I), "Context Window"),
+    (
+        re.compile(
+            r"invalid.?json|json.?parse|malformed.?json|unexpected.?token|expecting value|unterminated string|expecting ',' delimiter",
+            re.I,
+        ),
+        "Invalid JSON",
+    ),
+    (re.compile(r"timeout|timed.?out", re.I), "Timeout"),
+    (re.compile(r"model.?not.?found|no such model", re.I), "Model Not Found"),
+]
+
+_NON_HTTP_ERROR_LABELS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"timeout|timed.?out", re.I), "Timeout"),
+    (re.compile(r"connection.?refused|connect", re.I), "Connection Error"),
+]
+
+
+def parse_error_message(raw: str) -> str:
+    """Extract the human-readable message from a raw error_msg string.
+
+    error_msg is typically a JSON body like:
+      {"error": {"message": "...", "type": "...", ...}}
+    Returns the inner message string when present, otherwise raw as-is.
+    """
+    try:
+        body = json.loads(raw)
+        if isinstance(body, dict):
+            error = body.get("error") or body
+            if isinstance(error, dict) and "message" in error:
+                return str(error["message"])
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return raw
+
+
+def make_concise_label(error_type: str, error_msg: str) -> str:
+    """Produce a short human-readable label for an error entry.
+
+    For HTTP errors (error_type == "HTTP Error <code>"), returns "<code> - <label>".
+    The label is derived, in order, from: the status code itself
+    (_HTTP_CODE_LABELS), then message-specific patterns (_HTTP_ERROR_LABELS),
+    else "other".
+    For non-HTTP errors, matches against _NON_HTTP_ERROR_LABELS, falling back to a
+    lowercased error_type.
+    """
+    if error_type.startswith("HTTP Error "):
+        try:
+            code = error_type.split()[-1]
+        except IndexError:
+            code = "?"
+        code_label = _HTTP_CODE_LABELS.get(code)
+        if code_label is not None:
+            return f"{code} - {code_label}"
+        for pattern, label in _HTTP_ERROR_LABELS:
+            if pattern.search(error_msg):
+                return f"{code} - {label}"
+        return f"{code} - other"
+    for pattern, label in _NON_HTTP_ERROR_LABELS:
+        if pattern.search(error_msg):
+            return label
+    return error_type.lower().strip()
+
+
+def use_error_type_as_label(error_type: str, error_msg: str) -> str:
+    """Label function for errors whose ``error_type`` is already a stable code.
+
+    Session replay failures are raised by our own code and arrive pre-classified,
+    so the pattern matching in ``make_concise_label`` is the wrong instrument:
+    those regexes exist to wring structure out of server error text we do not
+    control, and applying them here would collapse distinct causes (any cause
+    whose prose happens to contain "timeout" would land in the same bucket).
+    """
+    return error_type
+
+
+def build_error_counts(
+    metrics_errors: list[tuple[str, str, Optional[str]]],
+    max_error_messages: int,
+    label_fn: Callable[[str, str], str] = make_concise_label,
+) -> dict[str, Any]:
+    """Build a {<label>: {count, messages}} dict from (error_type, error_msg, id) triples.
+
+    ``count`` reflects the true total number of errors for each label.
+    Identical messages within a label are merged into a single entry of the form
+    ``{"message": <text>, "session_ids": [...]}``; ``session_ids`` collects the ids
+    of every occurrence (omitted when no ids are present). The number of distinct
+    messages retained per label is capped at ``max_error_messages``.
+    Entries are sorted by descending count.
+    """
+    label_counts: dict[str, int] = defaultdict(int)
+    # Per label, merge by message text: message -> ordered list of session ids.
+    label_messages: dict[str, dict[str, list[str]]] = defaultdict(dict)
+    for error_type, error_msg, entity_id in metrics_errors:
+        parsed_msg = parse_error_message(error_msg)
+        label = label_fn(error_type, parsed_msg)
+        label_counts[label] += 1
+        merged = label_messages[label]
+        if parsed_msg in merged:
+            if entity_id is not None:
+                merged[parsed_msg].append(entity_id)
+        elif len(merged) < max_error_messages:
+            merged[parsed_msg] = [entity_id] if entity_id is not None else []
+
+    result: dict[str, Any] = {}
+    for label in sorted(label_counts, key=lambda k: -label_counts[k]):
+        messages: list[dict[str, Any]] = []
+        for message, session_ids in label_messages[label].items():
+            entry: dict[str, Any] = {"message": message}
+            if session_ids:
+                entry["session_ids"] = session_ids
+            messages.append(entry)
+        result[label] = {"count": label_counts[label], "messages": messages}
+    return result
 
 
 def safe_float(value: Any) -> float:
@@ -64,11 +207,219 @@ def summarize(items: List[float], percentiles: List[float]) -> Optional[dict[str
     return result
 
 
+def extract_cached_prompt_tokens(server_usage: Optional[dict[str, Any]]) -> Optional[tuple[int, int]]:
+    """Cached and total prompt tokens from a server ``usage`` dict.
+
+    Returns ``(cached_tokens, prompt_tokens)`` taken from the *same* source so a
+    hit rate built from them never mixes a server numerator with a client-side
+    denominator. Returns ``None`` — not ``(0, 0)`` — when the response carries no
+    cache information at all, so "the server never told us" stays distinguishable
+    from a genuine 0% hit rate.
+
+    Supports the **nested** layout (OpenAI, vLLM) where ``prompt_tokens`` is the
+    whole prompt and ``prompt_tokens_details.cached_tokens`` is a subset of it.
+
+    Returns ``None`` when the dict carries no cache field, so "the server never
+    reported" stays distinguishable from a genuine 0% rate.
+
+    Cached tokens are clamped to ``[0, prompt_tokens]``: a hit rate above 1.0 is
+    never a real measurement, and reporting one would be worse than clamping.
+    """
+    if not server_usage:
+        return None
+
+    prompt_tokens_details = server_usage.get("prompt_tokens_details")
+    if prompt_tokens_details and prompt_tokens_details.get("cached_tokens") is not None:
+        cached = int(safe_float(prompt_tokens_details.get("cached_tokens")))
+        prompt = int(safe_float(server_usage.get("prompt_tokens")))
+    else:
+        return None
+
+    if prompt <= 0:
+        return None
+
+    return min(max(cached, 0), prompt), prompt
+
+
+# Which usage keys carry token counts depends on the API: OpenAI-compatible servers report
+# prompt_tokens / completion_tokens, the Anthropic Messages API reports input_tokens /
+# output_tokens.
+SERVER_PROMPT_TOKEN_KEYS = ("prompt_tokens", "input_tokens")
+SERVER_OUTPUT_TOKEN_KEYS = ("completion_tokens", "output_tokens")
+
+
+def server_reported_tokens(server_usage: Optional[dict[str, Any]], keys: tuple[str, ...]) -> Optional[float]:
+    """Token count the server reported under any of ``keys``, or None if it reported none.
+
+    None is the provenance signal: the number the report carries for that request
+    came from client-side tokenization rather than from the server.
+    """
+    if not server_usage:
+        return None
+    for key in keys:
+        value = server_usage.get(key)
+        if value is not None:
+            return safe_float(value)
+    return None
+
+
+def count_client_fallbacks(metrics: List[RequestLifecycleMetric], keys: tuple[str, ...]) -> int:
+    """How many of these requests carry a client-side token count rather than the server's.
+
+    Reported next to token_count_mismatches rather than inside the token summaries,
+    which stay a total plus a pure distribution. A nonzero count means that
+    distribution mixes sources.
+    """
+    return sum(
+        1
+        for metric in metrics
+        if server_reported_tokens(metric.info.response_metrics.server_usage if metric.info.response_metrics else None, keys)
+        is None
+    )
+
+
+def summarize_prompt_token_usage(metrics: List[RequestLifecycleMetric], percentiles: List[float]) -> dict[str, float]:
+    """Input tokens already resolved at request time (request_metrics.text.input_tokens).
+
+    The per-request value is the server-reported usage.prompt_tokens when the server
+    provided it, otherwise the client-side tokenization — resolved once by
+    _resolve_prompt_tokens at response-processing time and stored in request_metrics.
+    Also reports the cached/uncached split from usage.prompt_tokens_details when present.
+    How many of these requests fell back to the client-side count is counted separately,
+    by count_client_fallbacks.
+    """
+    prompt_tokens_total = 0.0
+    prompt_tokens_cached = 0.0
+    per_request: List[float] = []
+
+    for metric in metrics:
+        response_metrics = metric.info.response_metrics
+        server_usage = response_metrics.server_usage if response_metrics else None
+        prompt_tokens_details = (server_usage.get("prompt_tokens_details") or {}) if server_usage else {}
+
+        prompt_tokens_value = safe_float(metric.info.request_metrics.text.input_tokens)
+        prompt_tokens_total += prompt_tokens_value
+        per_request.append(prompt_tokens_value)
+        prompt_tokens_cached += safe_float(prompt_tokens_details.get("cached_tokens"))
+
+    result = {
+        "total": prompt_tokens_total,
+        "cached": prompt_tokens_cached,
+        "uncached": max(prompt_tokens_total - prompt_tokens_cached, 0.0),
+    }
+    if distribution := summarize(per_request, percentiles):
+        result.update(distribution)
+    return result
+
+
+def summarize_output_token_usage(metrics: List[RequestLifecycleMetric], percentiles: List[float]) -> dict[str, float]:
+    """Output tokens as reported by the server (usage.completion_tokens).
+
+    The server-side count is exact (a count of decode steps), unlike a
+    client-side re-tokenization of the streamed text. Reports the aggregate
+    total alongside the per-request distribution (min/mean/max/percentiles).
+    Falls back to the client-side output_tokens for any request whose usage does
+    not report an output count; count_client_fallbacks counts those requests.
+    Mirrors summarize_prompt_token_usage on the input side.
+    """
+    output_tokens_total = 0.0
+    per_request: List[float] = []
+
+    for metric in metrics:
+        response_metrics = metric.info.response_metrics
+        server_usage = response_metrics.server_usage if response_metrics else None
+        completion_tokens = server_reported_tokens(server_usage, SERVER_OUTPUT_TOKEN_KEYS)
+        if completion_tokens is None:
+            completion_tokens = safe_float(response_metrics.output_tokens if response_metrics else None)
+        output_tokens_total += completion_tokens
+        per_request.append(completion_tokens)
+
+    result = {"total": output_tokens_total}
+    if distribution := summarize(per_request, percentiles):
+        result.update(distribution)
+    return result
+
+
+def effective_output_tokens(response_metrics: Optional[ResponseMetrics], use_server_output_tokens: bool) -> int:
+    """Output token count used to normalize per-token latency metrics (TPOT, NTPOT).
+
+    Defaults to the client-side re-tokenized count (`output_tokens`). When
+    `use_server_output_tokens` is set and the server reported a count under any of
+    SERVER_OUTPUT_TOKEN_KEYS, that count is used instead. Reads the same keys as
+    summarize_output_token_usage so "the server's output count" means one thing:
+    against a server reporting the Anthropic spelling, resolving only
+    `completion_tokens` here left the flag a silent no-op while the report field
+    said the count was server-sourced.
+    """
+    if response_metrics is None:
+        return 0
+    if use_server_output_tokens:
+        # `is not None`, not truthiness: a server that reports 0 output tokens has
+        # counted the request, and the report's own summary already records that 0.
+        server_tokens = server_reported_tokens(response_metrics.server_usage, SERVER_OUTPUT_TOKEN_KEYS)
+        if server_tokens is not None:
+            return int(server_tokens)
+    return response_metrics.output_tokens
+
+
+def summarize_retries(metrics: List[RequestLifecycleMetric], percentiles: List[float]) -> Optional[dict[str, Any]]:
+    """Roll up retry activity across a window of requests.
+
+    Returns None when nothing retried, so a report from a run with
+    ``request_retries: 0`` carries no retry section at all rather than a block
+    of zeros. ``requests_retried`` counts requests, ``attempts`` counts the
+    extra POSTs those requests cost; the two differ when one request retried
+    more than once. ``recovered``/``failed_after_retry`` partition ``requests_retried``.
+    A request lands in ``failed_after_retry`` either because it ran out of attempts or
+    because a retry reached the endpoint and came back with a non-retryable failure,
+    which stops the loop with attempts still in the budget; the key counts both.
+
+    Every latency in the report counts retry time -- ``start_time`` stays at dispatch --
+    so the cost is reported here as waste rather than by splitting the latency
+    definition. ``wasted_sec_total`` is the wall time this window lost to attempts that
+    failed and the backoff between them; ``wasted_sec`` distributes it per retried
+    request. Both include requests that never succeeded, whose every attempt was wasted.
+    """
+    retried = [m for m in metrics if m.info.retries_attempted > 0]
+    if not retried:
+        return None
+    recovered = [m for m in retried if m.info.retries_recovered]
+    wasted = [m.info.retry_wasted_sec for m in retried if m.info.retry_wasted_sec is not None]
+    summary: dict[str, Any] = {
+        "requests_retried": len(retried),
+        "attempts": sum(m.info.retries_attempted for m in retried),
+        "recovered": len(recovered),
+        "failed_after_retry": len(retried) - len(recovered),
+        "wasted_sec_total": float(sum(wasted)),
+    }
+    if distribution := summarize(wasted, percentiles):
+        summary["wasted_sec"] = distribution
+    return summary
+
+
 class ResponsesSummary(BaseModel):
     benchmark_time_seconds: float
     load_summary: dict[str, Any]
     successes: dict[str, Any]
     failures: dict[str, Any]
+    # Retry activity for the window, or None when request_retries is 0 and no
+    # request ever retried. A sibling of successes/failures rather than a key
+    # inside either, because retried requests land on both sides.
+    retries: Optional[dict[str, Any]] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_retries(self, handler: Any) -> dict[str, Any]:
+        """Drop `retries` entirely when it is None.
+
+        A run that never retried must serialize byte-identically to one built before
+        retries existed, so the default config's report gains no key at all -- not a
+        `"retries": null`. Enforced on the model rather than at the ~6 model_dump()
+        call sites so a new caller cannot reintroduce the key by omission.
+        """
+        dumped: dict[str, Any] = handler(self)
+        if dumped.get("retries") is None:
+            dumped.pop("retries", None)
+        return dumped
 
 
 def calculate_goodput_metrics(
@@ -76,9 +427,10 @@ def calculate_goodput_metrics(
     goodput_config: Optional[GoodputConfig],
     ttft_values: List[Optional[float]],
     tpot_values: List[Optional[float]],
-    ntpot_values: List[float],
+    ntpot_values: List[Optional[float]],
     request_latency_values: List[float],
     itl_values: List[Optional[float]],
+    use_server_output_tokens: bool = False,
 ) -> Optional[dict[str, Any]]:
     has_constraints = False
     if goodput_config and goodput_config.constraints:
@@ -159,12 +511,8 @@ def calculate_goodput_metrics(
 
         if is_good:
             good_requests_count += 1
-            in_tokens = m.info.input_tokens if m.info.input_tokens is not None else 0
-            out_tokens = (
-                m.info.response_info.output_tokens
-                if m.info.response_info and m.info.response_info.output_tokens is not None
-                else 0
-            )
+            in_tokens = m.info.request_metrics.text.input_tokens
+            out_tokens = effective_output_tokens(m.info.response_metrics, use_server_output_tokens)
             good_total_tokens += in_tokens + out_tokens
 
     goodput_percentage = (good_requests_count / total * 100) if total > 0 else 0.0
@@ -186,165 +534,253 @@ def calculate_goodput_metrics(
     return result
 
 
+def _ratio(num: Optional[float], den: Optional[float]) -> Optional[float]:
+    if num is None or den is None:
+        return None
+    return (num / den) * 100.0 if den > 0 else 0.0
+
+
 def summarize_prometheus_metrics(metrics: ModelServerMetrics) -> ResponsesSummary:
     return ResponsesSummary(
         benchmark_time_seconds=0.0,
         load_summary={},  # model server doesn't report failed requests
         failures={},
         successes={
-            "count": metrics.total_requests,
-            "rate": metrics.requests_per_second,
-            "prompt_len": {
-                "mean": metrics.avg_prompt_tokens,
-                "rate": metrics.prompt_tokens_per_second,
-            },
-            "output_len": {
-                "mean": metrics.avg_output_tokens,
-                "rate": metrics.output_tokens_per_second,
-            },
-            "queue_len": {
-                "mean": metrics.avg_queue_length,
-            },
-            "request_latency": {
-                "mean": metrics.avg_request_latency,
-                "median": metrics.median_request_latency,
-                "p90": metrics.p90_request_latency,
-                "p99": metrics.p99_request_latency,
-            },
-            "time_to_first_token": {
-                "mean": metrics.avg_time_to_first_token,
-                "median": metrics.median_time_to_first_token,
-                "p90": metrics.p90_time_to_first_token,
-                "p99": metrics.p99_time_to_first_token,
-            },
-            "time_per_output_token": {
-                "mean": metrics.avg_time_per_output_token,
-                "median": metrics.median_time_per_output_token,
-                "p90": metrics.p90_time_per_output_token,
-                "p99": metrics.p99_time_per_output_token,
-            },
-            "kv_cache_usage_percentage": {
-                "mean": metrics.avg_kv_cache_usage,
-                "median": metrics.median_kv_cache_usage,
-                "p90": metrics.p90_kv_cache_usage,
-                "p99": metrics.p99_kv_cache_usage,
-            },
-            "num_requests_swapped": {
-                "mean": metrics.num_requests_swapped,
-            },
-            "num_preemptions_total": {"mean": metrics.num_preemptions_total},
-            "prefix_cache_hit_percent": {
-                "mean": (metrics.prefix_cache_hits / metrics.prefix_cache_queries) * 100.0
-                if metrics.prefix_cache_queries > 0
-                else 0.0
-            },
-            "inter_token_latency": {
-                "mean": metrics.avg_inter_token_latency,
-                "median": metrics.median_inter_token_latency,
-                "p90": metrics.p90_inter_token_latency,
-                "p99": metrics.p99_inter_token_latency,
-            },
-            "num_requests_running": {
-                "mean": metrics.avg_num_requests_running,
-            },
-            "request_queue_time": {
-                "mean": metrics.avg_request_queue_time,
-                "median": metrics.median_request_queue_time,
-                "p90": metrics.p90_request_queue_time,
-                "p99": metrics.p99_request_queue_time,
-            },
-            "request_inference_time": {
-                "mean": metrics.avg_request_inference_time,
-                "median": metrics.median_request_inference_time,
-                "p90": metrics.p90_request_inference_time,
-                "p99": metrics.p99_request_inference_time,
-            },
-            "request_prefill_time": {
-                "mean": metrics.avg_request_prefill_time,
-                "median": metrics.median_request_prefill_time,
-                "p90": metrics.p90_request_prefill_time,
-                "p99": metrics.p99_request_prefill_time,
-            },
-            "request_decode_time": {
-                "mean": metrics.avg_request_decode_time,
-                "median": metrics.median_request_decode_time,
-                "p90": metrics.p90_request_decode_time,
-                "p99": metrics.p99_request_decode_time,
-            },
-            "request_prompt_tokens": {
-                "mean": metrics.avg_request_prompt_tokens,
-                "median": metrics.median_request_prompt_tokens,
-                "p90": metrics.p90_request_prompt_tokens,
-                "p99": metrics.p99_request_prompt_tokens,
-            },
-            "request_generation_tokens": {
-                "mean": metrics.avg_request_generation_tokens,
-                "median": metrics.median_request_generation_tokens,
-                "p90": metrics.p90_request_generation_tokens,
-                "p99": metrics.p99_request_generation_tokens,
-            },
-            "request_max_num_generation_tokens": {
-                "mean": metrics.avg_request_max_num_generation_tokens,
-                "median": metrics.median_request_max_num_generation_tokens,
-                "p90": metrics.p90_request_max_num_generation_tokens,
-                "p99": metrics.p99_request_max_num_generation_tokens,
-            },
-            "request_params_n": {
-                "mean": metrics.avg_request_params_n,
-                "median": metrics.median_request_params_n,
-                "p90": metrics.p90_request_params_n,
-                "p99": metrics.p99_request_params_n,
-            },
-            "request_params_max_tokens": {
-                "mean": metrics.avg_request_params_max_tokens,
-                "median": metrics.median_request_params_max_tokens,
-                "p90": metrics.p90_request_params_max_tokens,
-                "p99": metrics.p99_request_params_max_tokens,
-            },
-            "request_success_count": metrics.request_success_count,
-            "iteration_tokens": {
-                "mean": metrics.avg_iteration_tokens,
-                "median": metrics.median_iteration_tokens,
-                "p90": metrics.p90_iteration_tokens,
-                "p99": metrics.p99_iteration_tokens,
-            },
-            "prompt_tokens_cached": metrics.prompt_tokens_cached,
-            "prompt_tokens_recomputed": metrics.prompt_tokens_recomputed,
+            "count": metrics.requests.total,
+            "rate": metrics.requests.per_second,
+            "prompt_len": {"mean": metrics.prompt_tokens.avg, "rate": metrics.prompt_tokens.per_second},
+            "output_len": {"mean": metrics.output_tokens.avg, "rate": metrics.output_tokens.per_second},
+            "queue_len": {"mean": metrics.queue_length.avg},
+            "request_latency": metrics.request_latency.as_summary(),
+            "time_to_first_token": metrics.time_to_first_token.as_summary(),
+            "time_per_output_token": metrics.time_per_output_token.as_summary(),
+            "kv_cache_usage_percentage": metrics.kv_cache_usage.as_summary(),
+            "num_requests_swapped": {"mean": metrics.num_requests_swapped.total},
+            "num_preemptions_total": {"mean": metrics.num_preemptions_total.total},
+            "prefix_cache_hit_percent": {"mean": _ratio(metrics.prefix_cache_hits.total, metrics.prefix_cache_queries.total)},
+            "inter_token_latency": metrics.inter_token_latency.as_summary(),
+            "num_requests_running": {"mean": metrics.num_requests_running.avg},
+            "request_queue_time": metrics.request_queue_time.as_summary(),
+            "request_inference_time": metrics.request_inference_time.as_summary(),
+            "request_prefill_time": metrics.request_prefill_time.as_summary(),
+            "request_decode_time": metrics.request_decode_time.as_summary(),
+            "request_prompt_tokens": metrics.request_prompt_tokens.as_summary(),
+            "request_generation_tokens": metrics.request_generation_tokens.as_summary(),
+            "request_max_num_generation_tokens": metrics.request_max_num_generation_tokens.as_summary(),
+            "request_params_n": metrics.request_params_n.as_summary(),
+            "request_params_max_tokens": metrics.request_params_max_tokens.as_summary(),
+            "request_success_count": metrics.request_success_count.total,
+            "iteration_tokens": metrics.iteration_tokens.as_summary(),
+            "prompt_tokens_cached": metrics.prompt_tokens_cached.total,
             "external_prefix_cache_hit_percent": {
-                "mean": (metrics.external_prefix_cache_hits / metrics.external_prefix_cache_queries) * 100.0
-                if metrics.external_prefix_cache_queries > 0
-                else 0.0
+                "mean": _ratio(metrics.external_prefix_cache_hits.total, metrics.external_prefix_cache_queries.total)
             },
-            "mm_cache_hit_percent": {
-                "mean": (metrics.mm_cache_hits / metrics.mm_cache_queries) * 100.0 if metrics.mm_cache_queries > 0 else 0.0
-            },
-            "corrupted_requests": metrics.corrupted_requests,
-            "request_prefill_kv_computed_tokens": {
-                "mean": metrics.avg_request_prefill_kv_computed_tokens,
-                "median": metrics.median_request_prefill_kv_computed_tokens,
-                "p90": metrics.p90_request_prefill_kv_computed_tokens,
-                "p99": metrics.p99_request_prefill_kv_computed_tokens,
-            },
-            "kv_block_idle_before_evict": {
-                "mean": metrics.avg_kv_block_idle_before_evict,
-                "median": metrics.median_kv_block_idle_before_evict,
-                "p90": metrics.p90_kv_block_idle_before_evict,
-                "p99": metrics.p99_kv_block_idle_before_evict,
-            },
-            "kv_block_lifetime": {
-                "mean": metrics.avg_kv_block_lifetime,
-                "median": metrics.median_kv_block_lifetime,
-                "p90": metrics.p90_kv_block_lifetime,
-                "p99": metrics.p99_kv_block_lifetime,
-            },
-            "kv_block_reuse_gap": {
-                "mean": metrics.avg_kv_block_reuse_gap,
-                "median": metrics.median_kv_block_reuse_gap,
-                "p90": metrics.p90_kv_block_reuse_gap,
-                "p99": metrics.p99_kv_block_reuse_gap,
-            },
+            "mm_cache_hit_percent": {"mean": _ratio(metrics.mm_cache_hits.total, metrics.mm_cache_queries.total)},
+            "corrupted_requests": metrics.corrupted_requests.total,
+            "request_prefill_kv_computed_tokens": metrics.request_prefill_kv_computed_tokens.as_summary(),
+            "kv_block_idle_before_evict": metrics.kv_block_idle_before_evict.as_summary(),
+            "kv_block_lifetime": metrics.kv_block_lifetime.as_summary(),
+            "kv_block_reuse_gap": metrics.kv_block_reuse_gap.as_summary(),
         },
     )
+
+
+def _chunk_content(data: Any) -> Optional[str]:
+    """Content text from a parsed SSE chunk (chat/completions choices or an Anthropic text delta)."""
+    if choices := data.get("choices"):
+        delta = choices[0]
+        text = delta.get("text") or delta.get("delta", {}).get("content")
+        if text:
+            return str(text)
+    elif delta := data.get("delta"):
+        if isinstance(delta, dict) and (text := delta.get("text")):
+            return str(text)
+    elif data.get("type") == "content_block_start":
+        block = data.get("content_block") or {}
+        if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+            return str(block["text"])
+    return None
+
+
+def _extract_chunk_text(chunk_str: str) -> Optional[str]:
+    """Extract text content from an SSE streaming response JSON chunk."""
+    try:
+        return _chunk_content(json.loads(chunk_str))
+    except (json.JSONDecodeError, IndexError, TypeError, AttributeError):
+        return None
+
+
+def _extract_chunk_reasoning(data: dict[str, Any]) -> Optional[str]:
+    """Reasoning text from a parsed SSE chunk: OpenAI-style delta fields or an Anthropic thinking event."""
+    if choices := data.get("choices"):
+        delta = choices[0].get("delta") or {}
+        return reasoning_field(delta) if isinstance(delta, dict) else None
+    event_type = data.get("type")
+    if event_type == "content_block_delta":
+        delta = data.get("delta") or {}
+        if isinstance(delta, dict) and delta.get("type") == "thinking_delta" and (thinking := delta.get("thinking")):
+            return str(thinking)
+    elif event_type == "content_block_start":
+        block = data.get("content_block") or {}
+        if isinstance(block, dict) and block.get("type") == "thinking" and (thinking := block.get("thinking")):
+            return str(thinking)
+    return None
+
+
+def _extract_chunk_generated_texts(chunk_str: str) -> list[str]:
+    """Generated text in an SSE chunk, one entry per channel: reasoning, then content (#559).
+
+    Kept apart because the server generated them as separate tokens. Joined, the
+    last reasoning word and the first content word can tokenize as one.
+    """
+    try:
+        data = json.loads(chunk_str)
+        texts = [_extract_chunk_reasoning(data), _chunk_content(data)]
+    except (json.JSONDecodeError, IndexError, TypeError, AttributeError):
+        return []
+    return [text for text in texts if text]
+
+
+def correct_streamed_response_metrics(m: RequestLifecycleMetric, tokenizer: Optional[CustomTokenizer]) -> bool:
+    """Re-derive output_token_times for a streamed response from its raw chunks.
+
+    Mutates m.info.response_metrics in place so that the summary, per-stage, and
+    per-request reports all see the same tokenizer-corrected token timings.
+    Returns True if the tokenizer-derived token count doesn't match the
+    server-reported output count (completion_tokens / output_tokens).
+    """
+    if not (
+        isinstance(m.info.response_metrics, StreamedResponseMetrics)
+        and (m.info.response_metrics.response_chunks or m.info.response_metrics.reasoning_chunks)
+        and tokenizer
+    ):
+        return False
+
+    expected_output_tokens = server_reported_tokens(m.info.response_metrics.server_usage, SERVER_OUTPUT_TOKEN_KEYS)
+    output_token_times = retokenize_output_token_times(m.info.response_metrics, tokenizer)
+    m.info.response_metrics.output_token_times = output_token_times
+    # Do not overwrite output_tokens with the per-chunk sum. Keep the API layer's whole-message
+    # count_tokens value, and surface the exact server count as `output_tokens`. See #564.
+
+    return expected_output_tokens is not None and len(output_token_times) != expected_output_tokens
+
+
+def retokenize_output_token_times(response_metrics: StreamedResponseMetrics, tokenizer: CustomTokenizer) -> list[float]:
+    """One timestamp per generated token, from re-tokenizing the raw content and reasoning chunks."""
+    output_token_times: list[float] = []
+    token_cache = getattr(tokenizer, "_count_tokens_cache", None)
+    if not isinstance(token_cache, dict):
+        token_cache = {}
+        try:
+            tokenizer._count_tokens_cache = token_cache  # type: ignore[attr-defined]
+        except Exception:
+            token_cache = None
+
+    # Content and reasoning-only chunks, in arrival order. The server counts
+    # reasoning tokens in completion_tokens, so they belong on the timeline
+    # and in the mismatch accounting alike (#559).
+    chunks = heapq.merge(
+        zip(response_metrics.chunk_times, response_metrics.response_chunks, strict=True),
+        zip(response_metrics.reasoning_chunk_times, response_metrics.reasoning_chunks, strict=True),
+        key=lambda pair: pair[0],
+    )
+    for chunk_time, chunk_str in chunks:
+        tokens_in_chunk = 0
+        for text in _extract_chunk_generated_texts(chunk_str):
+            # Count each chunk as a sequence fragment (add_special_tokens=False): re-tokenizing a
+            # chunk with special tokens prepends a BOS per chunk, which inflates the count (~2x at
+            # one token per chunk) and, since these timestamps are the basis for ITL, deflates ITL
+            # by the same factor. See #564.
+            if token_cache is not None and text in token_cache:
+                tokens_in_text = token_cache[text]
+            else:
+                tokens_in_text = tokenizer.count_tokens(text, add_special_tokens=False)
+                if token_cache is not None and len(token_cache) < 8192:
+                    token_cache[text] = tokens_in_text
+            tokens_in_chunk += tokens_in_text
+
+        if tokens_in_chunk > 0:
+            # Assign every token in a chunk the chunk's arrival time to match user-perceived
+            # latency: intra-chunk ITL is 0, inter-chunk ITL absorbs the full gap. TPOT still
+            # reports the smoothed average.
+            output_token_times.extend([chunk_time] * tokens_in_chunk)
+
+    return output_token_times
+
+
+def first_content_token_time(response_metrics: StreamedResponseMetrics) -> Optional[float]:
+    """Arrival time of the first content chunk, skipping reasoning.
+
+    chunk_times is the content channel alone. A record with no chunk_times
+    and no reasoning predates the split, so its output_token_times is content.
+    """
+    if response_metrics.chunk_times:
+        # Tokenizer correction drops chunks that re-tokenize to nothing from the
+        # timeline. Skipping them here too keeps TTFO from landing before TTFT.
+        token_times = set(response_metrics.output_token_times)
+        return next((t for t in response_metrics.chunk_times if t in token_times), None)
+    if response_metrics.output_token_times and not response_metrics.reasoning_chunk_times:
+        return response_metrics.output_token_times[0]
+    return None
+
+
+def compute_request_latency_metrics(m: RequestLifecycleMetric, use_server_output_tokens: bool = False) -> dict[str, Any]:
+    """Compute per-request latency metrics for a single successful request.
+
+    Uses the same formulas as the aggregation loop in summarize_requests() so
+    per-request values stay consistent with the summary/per-stage reports.
+    Assumes correct_streamed_response_metrics() has already been applied.
+    """
+    request_latency = m.end_time - m.start_time
+    response_metrics = m.info.response_metrics
+
+    # NTPOT: (End - Start) / Output Tokens. Not measurable without output tokens
+    # (e.g. embeddings), so None rather than a fabricated 0.0, matching the
+    # llm-d benchmark report (reportgen/br/v0_2/adapter.py).
+    ntpot_output_tokens = effective_output_tokens(response_metrics, use_server_output_tokens)
+    ntpot: Optional[float] = request_latency / ntpot_output_tokens if ntpot_output_tokens > 0 else None
+
+    ttft: Optional[float] = None
+    ttfo: Optional[float] = None
+    tpot: Optional[float] = None
+    itl: Optional[float] = None
+    itl_deltas: List[float] = []
+
+    # output_token_times holds every generated token, reasoning included
+    # (#559): the server generates and counts reasoning tokens like any other,
+    # so TTFT, TPOT and ITL do too. Streamable means more than one timestamp.
+    if isinstance(response_metrics, StreamedResponseMetrics) and len(response_metrics.output_token_times) > 1:
+        # TTFT: First Token Time - Start Time
+        ttft = response_metrics.output_token_times[0] - m.start_time
+
+        # Time to first output token: the first content token, after any
+        # reasoning. Equals TTFT when the model emits no reasoning; None when
+        # the output budget ran out before any content arrived.
+        if (first_content := first_content_token_time(response_metrics)) is not None:
+            ttfo = first_content - m.start_time
+
+        # TPOT: (Last Token Time - First Token Time) / (Num Output Tokens - 1)
+        duration = response_metrics.output_token_times[-1] - response_metrics.output_token_times[0]
+        tpot_output_tokens = effective_output_tokens(response_metrics, use_server_output_tokens)
+        if tpot_output_tokens > 1:
+            tpot = duration / (tpot_output_tokens - 1)
+
+        itl_deltas = [
+            t2 - t1
+            for t1, t2 in zip(response_metrics.output_token_times, response_metrics.output_token_times[1:], strict=False)
+        ]
+        if itl_deltas:
+            itl = sum(itl_deltas) / len(itl_deltas)
+
+    return {
+        "request_latency": request_latency,
+        "normalized_time_per_output_token": ntpot,
+        "time_to_first_token": ttft,
+        "time_to_first_output_token": ttfo,
+        "time_per_output_token": tpot,
+        "inter_token_latency": itl,
+        "inter_token_latency_deltas": itl_deltas,
+    }
 
 
 def summarize_requests(
@@ -354,6 +790,8 @@ def summarize_requests(
     stage_concurrency: Optional[int] = None,
     goodput_config: Optional[GoodputConfig] = None,
     tokenizer: Optional[CustomTokenizer] = None,
+    use_server_output_tokens: bool = False,
+    max_error_messages: int = 100,
 ) -> ResponsesSummary:
     all_successful: List[RequestLifecycleMetric] = [x for x in metrics if x.error is None]
     all_failed: List[RequestLifecycleMetric] = [x for x in metrics if x.error is not None]
@@ -385,128 +823,94 @@ def summarize_requests(
     # --- Pre-calculate Metrics for all successful requests ---
     # We maintain 1:1 mapping with 'all_successful' to pass to SLO calculator
 
-    ntpot_values: List[float] = []
+    ntpot_values: List[Optional[float]] = []  # Optional: None without output tokens
     tpot_values: List[Optional[float]] = []  # Optional: None if not streamable
     ttft_values: List[Optional[float]] = []  # Optional: None if not streamable
+    ttfo_values: List[Optional[float]] = []  # Optional: None if not streamable or no content
     request_latency_values: List[float] = []
     itl_values: List[Optional[float]] = []
     inter_token_latencies: List[float] = []
 
     mismatched_requests = 0
     for m in all_successful:
-        request_latency_values.append(m.end_time - m.start_time)
+        if correct_streamed_response_metrics(m, tokenizer):
+            mismatched_requests += 1
 
-        # Process raw chunks if present and tokenizer is available
-        if (
-            isinstance(m.info.response_info, StreamedInferenceResponseInfo)
-            and m.info.response_info.response_chunks
-            and tokenizer
-        ):
-            output_token_times = []
-            accumulated_tokens = 0
-            parsed_chunks = []
-            expected_output_tokens = (
-                m.info.response_info.server_usage.get("completion_tokens") if m.info.response_info.server_usage else None
-            )
-
-            for chunk_str, chunk_time in zip(
-                m.info.response_info.response_chunks, m.info.response_info.chunk_times, strict=True
-            ):
-                try:
-                    data = json.loads(chunk_str)
-                    if choices := data.get("choices"):
-                        delta = choices[0]
-                        text = delta.get("text") or delta.get("delta", {}).get("content")
-                        if text:
-                            parsed_chunks.append((text, chunk_time))
-                except json.JSONDecodeError:
-                    continue
-
-            for text, chunk_time in parsed_chunks:
-                tokens_in_chunk = tokenizer.count_tokens(text)
-                if tokens_in_chunk > 0:
-                    # Assign every token in a chunk the chunk's arrival time to match user-perceived
-                    # latency: intra-chunk ITL is 0, inter-chunk ITL absorbs the full gap. TPOT still
-                    # reports the smoothed average.
-                    for _ in range(tokens_in_chunk):
-                        output_token_times.append(chunk_time)
-                    accumulated_tokens += tokens_in_chunk
-
-            m.info.response_info.output_token_times = output_token_times
-            m.info.response_info.output_tokens = accumulated_tokens
-
-            if expected_output_tokens is not None and accumulated_tokens != expected_output_tokens:
-                mismatched_requests += 1
-
-        # NTPOT: (End - Start) / Output Tokens (Calculated for ALL successful requests)
-        if m.info.response_info and m.info.response_info.output_tokens and m.info.response_info.output_tokens > 0:
-            ntpot_values.append((m.end_time - m.start_time) / m.info.response_info.output_tokens)
-        else:
-            ntpot_values.append(0.0)
-
-        # Check if streamable: Must have more than 1 output token timestamp
-        response_info = m.info.response_info
-        if isinstance(response_info, StreamedInferenceResponseInfo) and len(response_info.output_token_times) > 1:
-            # TTFT: First Token Time - Start Time
-            ttft = response_info.output_token_times[0] - m.start_time
-            ttft_values.append(ttft)
-
-            # TPOT: (Last Token Time - First Token Time) / (Num Output Tokens - 1)
-            duration = response_info.output_token_times[-1] - response_info.output_token_times[0]
-            if response_info.output_tokens > 1:
-                tpot = duration / (response_info.output_tokens - 1)
-            else:
-                tpot = None
-            tpot_values.append(tpot)
-
-            # Add inter-token deltas
-            request_itl = []
-            for t1, t2 in zip(response_info.output_token_times, response_info.output_token_times[1:], strict=False):
-                inter_token_latencies.append(t2 - t1)
-                request_itl.append(t2 - t1)
-
-            if request_itl:
-                itl_values.append(sum(request_itl) / len(request_itl))
-            else:
-                itl_values.append(None)
-        else:
-            # Not streamable, so TTFT and TPOT are undefined
-            ttft_values.append(None)
-            tpot_values.append(None)
-            itl_values.append(None)
+        latency = compute_request_latency_metrics(m, use_server_output_tokens)
+        request_latency_values.append(latency["request_latency"])
+        ntpot_values.append(latency["normalized_time_per_output_token"])
+        ttft_values.append(latency["time_to_first_token"])
+        ttfo_values.append(latency["time_to_first_output_token"])
+        tpot_values.append(latency["time_per_output_token"])
+        itl_values.append(latency["inter_token_latency"])
+        inter_token_latencies.extend(latency["inter_token_latency_deltas"])
 
     # --- Calculate Goodput Metrics ---
     goodput_metrics = calculate_goodput_metrics(
-        all_successful, goodput_config, ttft_values, tpot_values, ntpot_values, request_latency_values, itl_values
+        all_successful,
+        goodput_config,
+        ttft_values,
+        tpot_values,
+        ntpot_values,
+        request_latency_values,
+        itl_values,
+        use_server_output_tokens=use_server_output_tokens,
     )
 
     # --- Filter lists for summarization (remove Nones) ---
     valid_tpot = [v for v in tpot_values if v is not None]
+    valid_ntpot = [v for v in ntpot_values if v is not None]
     valid_ttft = [v for v in ttft_values if v is not None]
+    valid_ttfo = [v for v in ttfo_values if v is not None]
 
-    successes_dict = {
+    request_sizes = [len(x.request_data.encode("utf-8")) for x in all_successful]
+    all_images = []
+    all_videos = []
+    all_audios = []
+    for success in all_successful:
+        if success.info.request_metrics.image:
+            all_images.extend(success.info.request_metrics.image.instances)
+        if success.info.request_metrics.video:
+            all_videos.extend(success.info.request_metrics.video.instances)
+        if success.info.request_metrics.audio:
+            all_audios.extend(success.info.request_metrics.audio.instances)
+
+    image_counts = [
+        safe_float(s.info.request_metrics.image.count if s.info.request_metrics.image else 0) for s in all_successful
+    ]
+    video_counts = [
+        safe_float(s.info.request_metrics.video.count if s.info.request_metrics.video else 0) for s in all_successful
+    ]
+    audio_counts = [
+        safe_float(s.info.request_metrics.audio.count if s.info.request_metrics.audio else 0) for s in all_successful
+    ]
+
+    successes_dict: dict[str, Any] = {
         "count": len(all_successful),
         "latency": {
             "request_latency": summarize(request_latency_values, percentiles),
-            "normalized_time_per_output_token": summarize(ntpot_values, percentiles),
+            "normalized_time_per_output_token": summarize(valid_ntpot, percentiles),
             "time_per_output_token": summarize(valid_tpot, percentiles),
             "time_to_first_token": summarize(valid_ttft, percentiles),
+            "time_to_first_output_token": summarize(valid_ttfo, percentiles),
             "inter_token_latency": summarize(inter_token_latencies, percentiles),
         },
         "throughput": {
             "input_tokens_per_sec": (
-                sum(safe_float(x.info.input_tokens) for x in all_successful) / total_time if total_time > 0 else 0.0
+                sum(safe_float(x.info.request_metrics.text.input_tokens) for x in all_successful) / total_time
+                if total_time > 0
+                else 0.0
             ),
             "output_tokens_per_sec": (
-                sum(safe_float(x.info.response_info.output_tokens) if x.info.response_info else 0.0 for x in all_successful)
+                sum(effective_output_tokens(x.info.response_metrics, use_server_output_tokens) for x in all_successful)
                 / total_time
                 if total_time > 0
                 else 0.0
             ),
             "total_tokens_per_sec": (
                 sum(
-                    safe_float(x.info.input_tokens)
-                    + (safe_float(x.info.response_info.output_tokens) if x.info.response_info else 0.0)
+                    safe_float(x.info.request_metrics.text.input_tokens)
+                    + effective_output_tokens(x.info.response_metrics, use_server_output_tokens)
                     for x in all_successful
                 )
                 / total_time
@@ -514,38 +918,134 @@ def summarize_requests(
                 else 0.0
             ),
             "requests_per_sec": (len(all_successful) / total_time if total_time > 0 else 0.0),
+            "images_per_sec": (sum(image_counts) / total_time if total_time > 0 else 0.0),
+            "videos_per_sec": (sum(video_counts) / total_time if total_time > 0 else 0.0),
+            "audios_per_sec": (sum(audio_counts) / total_time if total_time > 0 else 0.0),
         },
-        "prompt_len": summarize([safe_float(success.info.input_tokens) for success in all_successful], percentiles),
+        "request_size_bytes": summarize([float(x) for x in request_sizes], percentiles),
+        "image": {
+            "count": summarize(image_counts, percentiles),
+            "pixels": summarize([safe_float(inst.pixels) for inst in all_images], percentiles),
+            "bytes": summarize([safe_float(inst.bytes) for inst in all_images], percentiles),
+            "aspect_ratio": summarize([safe_float(inst.aspect_ratio) for inst in all_images], percentiles),
+        },
+        "video": {
+            "count": summarize(video_counts, percentiles),
+            "frames": summarize([safe_float(inst.frames) for inst in all_videos], percentiles),
+            "pixels": summarize([safe_float(inst.pixels) for inst in all_videos], percentiles),
+            "bytes": summarize([safe_float(inst.bytes) for inst in all_videos], percentiles),
+            "aspect_ratio": summarize([safe_float(inst.aspect_ratio) for inst in all_videos], percentiles),
+        },
+        "audio": {
+            "count": summarize(audio_counts, percentiles),
+            "seconds": summarize([safe_float(inst.seconds) for inst in all_audios], percentiles),
+            "bytes": summarize([safe_float(inst.bytes) for inst in all_audios], percentiles),
+        },
+        "prompt_tokens": summarize_prompt_token_usage(all_successful, percentiles),
         "output_len": summarize(
             [
                 float(v)
                 for success in all_successful
-                if success.info.response_info and (v := success.info.response_info.output_tokens) is not None
+                if success.info.response_metrics and (v := success.info.response_metrics.output_tokens) is not None
             ],
             percentiles,
         ),
+        "output_tokens": summarize_output_token_usage(all_successful, percentiles),
         "token_count_mismatches": mismatched_requests,
+        # Keyed by side, not by the sibling field names: the values count requests,
+        # and a prompt_tokens/output_tokens key here would read as a token count.
+        "client_fallback_requests": {
+            "prompt": count_client_fallbacks(all_successful, SERVER_PROMPT_TOKEN_KEYS),
+            "output": count_client_fallbacks(all_successful, SERVER_OUTPUT_TOKEN_KEYS),
+        },
     }
     if goodput_metrics:
         successes_dict["goodput_metrics"] = goodput_metrics
 
     return ResponsesSummary(
+        retries=summarize_retries(all_successful + all_failed, percentiles),
         benchmark_time_seconds=total_time,
         load_summary=load_summary,
         successes=successes_dict,
         failures={
             "count": len(all_failed),
             "request_latency": summarize([(failed.end_time - failed.start_time) for failed in all_failed], percentiles),
-            "prompt_len": summarize([safe_float(failed.info.input_tokens) for failed in all_failed], percentiles),
+            "prompt_tokens": summarize_prompt_token_usage(all_failed, percentiles),
+            "by_label": build_error_counts(
+                [(m.error.error_type, m.error.error_msg, m.session_id) for m in all_failed if m.error is not None],
+                max_error_messages,
+            ),
         },
     )
+
+
+def build_per_request_lifecycle_entry(
+    metric: RequestLifecycleMetric,
+    fields: PerRequestFieldsConfig,
+    tokenizer: Optional[CustomTokenizer] = None,
+    use_server_output_tokens: bool = False,
+) -> dict[str, Any]:
+    if fields.computed_metrics and metric.error is None:
+        # Correct output_token_times from raw chunks before the info dump and computed_metrics
+        # below, so both reflect the same tokenizer-corrected timings that summary/per-stage
+        # reports use. Skipped when computed_metrics is off so the raw per-request output is
+        # untouched.
+        correct_streamed_response_metrics(metric, tokenizer)
+
+    entry: dict[str, Any] = {
+        "start_time": metric.start_time,
+        "end_time": metric.end_time,
+        "scheduled_time": metric.scheduled_time,
+    }
+    if metric.stage_id is not None:
+        entry["stage_id"] = metric.stage_id
+    if metric.session_id is not None:
+        entry["session_id"] = metric.session_id
+    if metric.request_session_id is not None:
+        entry["request_session_id"] = metric.request_session_id
+
+    if fields.request:
+        entry["request"] = metric.request_data
+
+    if fields.response:
+        entry["response"] = metric.response_data
+
+    if fields.info:
+        info = metric.info.model_dump() if metric.info else None
+        if info and not fields.response_chunks:
+            response_metrics = info.get("response_metrics")
+            if isinstance(response_metrics, dict):
+                # Reasoning chunks are raw stream JSON too, and most of a reasoning model's stream.
+                response_metrics.pop("response_chunks", None)
+                response_metrics.pop("reasoning_chunks", None)
+        entry["info"] = info
+
+    if fields.computed_metrics and metric.error is None:
+        latency = compute_request_latency_metrics(metric, use_server_output_tokens)
+        entry["computed_metrics"] = {
+            "request_latency": latency["request_latency"],
+            "normalized_time_per_output_token": latency["normalized_time_per_output_token"],
+            "time_to_first_token": latency["time_to_first_token"],
+            "time_to_first_output_token": latency["time_to_first_output_token"],
+            "time_per_output_token": latency["time_per_output_token"],
+            "inter_token_latency": latency["inter_token_latency"],
+            "inter_token_latencies": latency["inter_token_latency_deltas"],
+            "input_tokens": metric.info.request_metrics.text.input_tokens,
+            "output_tokens": metric.info.response_metrics.output_tokens if metric.info.response_metrics else None,
+            "ttft_slo_sec": metric.ttft_slo_sec,
+            "tpot_slo_sec": metric.tpot_slo_sec,
+        }
+
+    entry["error"] = metric.error.model_dump() if metric.error else None
+
+    return entry
 
 
 class ReportGenerator:
     def __init__(
         self,
-        metrics_client: Optional[MetricsClient],
-        metrics_collector: RequestDataCollector,
+        metrics_client: Optional[ServerMetricsClient],
+        metrics_collector: RequestMetricCollector,
         config: "Config",
         datagen: Optional[Union["DataGenerator", "SessionGenerator"]] = None,
     ) -> None:
@@ -555,20 +1055,41 @@ class ReportGenerator:
         self.datagen = datagen
         self.session_metrics_collector: Optional[SessionMetricsCollector] = None
 
-    def get_metrics_collector(self) -> RequestDataCollector:
+    def get_metrics_collector(self) -> RequestMetricCollector:
         """
         Returns the metrics collector.
         """
         return self.metrics_collector
 
+    def _build_tokenizer(self) -> Optional[CustomTokenizer]:
+        """Build the tokenizer the report counts tokens with, if the run has one.
+
+        The run config carries the tokenizer main.py resolved -- the configured path, a
+        detected model name, or the model entry's root -- so the report corrects
+        streamed token timings the same way the client counted them. A run that resolves
+        no tokenizer (the mock server type among them) reports without the correction
+        rather than failing.
+        """
+        if self.config.tokenizer is None or not self.config.tokenizer.pretrained_model_name_or_path:
+            return None
+        # Imported here, not at module scope: the tests that substitute a tokenizer patch
+        # inference_perf.utils.custom_tokenizer.CustomTokenizer, and a module-level binding
+        # would resolve before that patch is applied.
+        from inference_perf.utils.custom_tokenizer import CustomTokenizer
+
+        return CustomTokenizer(self.config.tokenizer)
+
     def generate_config_report(self) -> ReportFile:
         """
         Generates a report file containing the config.
+
+        Credentials are masked: the report bundle is uploaded to object storage and
+        passed around, so it carries the shape of the run and not the keys it used.
         """
         return ReportFile(
             name="config",
             file_type="yaml",
-            contents=self.config.model_dump(mode="json", by_alias=True),
+            contents=redact(self.config.model_dump(mode="json", by_alias=True), Config),
         )
 
     async def generate_reports(
@@ -577,12 +1098,10 @@ class ReportGenerator:
         logger.info("Generating Reports...")
         lifecycle_reports = []
         percentiles = report_config.request_lifecycle.percentiles
+        use_server_output_tokens = report_config.request_lifecycle.use_server_output_tokens
+        max_error_messages = report_config.request_lifecycle.max_error_messages
 
-        tokenizer = None
-        if self.config.tokenizer:
-            from inference_perf.utils.custom_tokenizer import CustomTokenizer
-
-            tokenizer = CustomTokenizer(self.config.tokenizer)
+        tokenizer = self._build_tokenizer()
 
         # Filter out the preprocessing stage -1
         request_metrics = [
@@ -594,7 +1113,12 @@ class ReportGenerator:
                 report_file = ReportFile(
                     name="summary_lifecycle_metrics",
                     contents=summarize_requests(
-                        request_metrics, percentiles, goodput_config=report_config.goodput, tokenizer=tokenizer
+                        request_metrics,
+                        percentiles,
+                        goodput_config=report_config.goodput,
+                        tokenizer=tokenizer,
+                        use_server_output_tokens=use_server_output_tokens,
+                        max_error_messages=max_error_messages,
                     ).model_dump(),
                 )
                 lifecycle_reports.append(report_file)
@@ -617,29 +1141,31 @@ class ReportGenerator:
                             concurrency_level,
                             goodput_config=report_config.goodput,
                             tokenizer=tokenizer,
+                            use_server_output_tokens=use_server_output_tokens,
+                            max_error_messages=max_error_messages,
                         ).model_dump(),
                     )
                 else:
                     report_file = ReportFile(
                         name=f"stage_{stage_id}_lifecycle_metrics",
                         contents=summarize_requests(
-                            metrics, percentiles, stage_rate, goodput_config=report_config.goodput, tokenizer=tokenizer
+                            metrics,
+                            percentiles,
+                            stage_rate,
+                            goodput_config=report_config.goodput,
+                            tokenizer=tokenizer,
+                            use_server_output_tokens=use_server_output_tokens,
+                            max_error_messages=max_error_messages,
                         ).model_dump(),
                     )
                 lifecycle_reports.append(report_file)
 
         if report_config.request_lifecycle.per_request:
+            fields = report_config.request_lifecycle.per_request_fields
             report_file = ReportFile(
                 name="per_request_lifecycle_metrics",
                 contents=[
-                    {
-                        "start_time": metric.start_time,
-                        "end_time": metric.end_time,
-                        "request": metric.request_data,
-                        "response": metric.response_data,
-                        "info": metric.info.model_dump() if metric.info else None,
-                        "error": metric.error.model_dump() if metric.error else None,
-                    }
+                    build_per_request_lifecycle_entry(metric, fields, tokenizer, use_server_output_tokens)
                     for metric in request_metrics
                 ],
             )
@@ -654,7 +1180,12 @@ class ReportGenerator:
                 report_file = ReportFile(
                     name=f"adapter_{adapter}_lifecycle_metrics",
                     contents=summarize_requests(
-                        metrics, percentiles, goodput_config=report_config.goodput, tokenizer=tokenizer
+                        metrics,
+                        percentiles,
+                        goodput_config=report_config.goodput,
+                        tokenizer=tokenizer,
+                        use_server_output_tokens=use_server_output_tokens,
+                        max_error_messages=max_error_messages,
                     ).model_dump(),
                 )
                 lifecycle_reports.append(report_file)
@@ -670,50 +1201,262 @@ class ReportGenerator:
                 report_file = ReportFile(
                     name=f"adapter_{adapter}_stage_{stage_id}_lifecycle_metrics",
                     contents=summarize_requests(
-                        metrics, percentiles, stage_rate, goodput_config=report_config.goodput, tokenizer=tokenizer
+                        metrics,
+                        percentiles,
+                        stage_rate,
+                        goodput_config=report_config.goodput,
+                        tokenizer=tokenizer,
+                        use_server_output_tokens=use_server_output_tokens,
+                        max_error_messages=max_error_messages,
                     ).model_dump(),
                 )
                 lifecycle_reports.append(report_file)
 
         if report_config.prometheus:
-            lifecycle_reports.extend(self.generate_prometheus_metrics_report(runtime_parameters, report_config.prometheus))
+            # This runs after the load has already been sent; a failure here must cost the
+            # Prometheus section, not the lifecycle reports the run already produced.
+            try:
+                lifecycle_reports.extend(self.generate_prometheus_metrics_report(runtime_parameters, report_config.prometheus))
+            except Exception:
+                logger.exception("Prometheus metrics report generation failed; continuing without it")
+
+        # Session metrics are enriched once, ahead of the partial-report loop:
+        # the BR0.2 partial carries the same per-session token totals the native
+        # session reports render, and _enrich_sessions is what derives them from
+        # the request metrics. Bucketing by stage_id mirrors br_stage_buckets
+        # below so each stage's partial gets exactly its own sessions.
+        session_metrics: List[SessionLifecycleMetric] = []
+        session_metrics_by_stage: dict[int, List[SessionLifecycleMetric]] = defaultdict(list)
+        # Stages whose session counts the partial has to report. A stage cut
+        # short by max_stage_duration whose sessions all stranded leaves no
+        # request metric either, so it would be missing from br_stage_buckets
+        # below; generate_session_reports emits a per-stage file for it, and the
+        # partial has to match.
+        session_stage_ids: set[int] = set()
+        if self.session_metrics_collector and report_config.session_lifecycle:
+            session_metrics = self.session_metrics_collector.get_metrics()
+            self._enrich_sessions(session_metrics, request_metrics, use_server_output_tokens)
+            for session_metric in session_metrics:
+                session_metrics_by_stage[session_metric.stage_id].append(session_metric)
+                session_stage_ids.add(session_metric.stage_id)
+            for stage_id, stage_runtime_info in runtime_parameters.stages.items():
+                if stage_runtime_info.sessions_not_completed_active or stage_runtime_info.sessions_not_completed_pending:
+                    session_stage_ids.add(stage_id)
+
+        if request_metrics or session_stage_ids:
+            # Always emit the inference-perf slice of a BR0.2 report per stage,
+            # alongside the native inference-perf reports. Downstream composers
+            # (llm-d-benchmark CLI, wrappers, ad-hoc yq merges) layer their
+            # own partials on top to produce a full BR0.2 document.
+            # Imported here rather than at module top: the br.v0_2 adapter
+            # imports effective_output_tokens from this module.
+            from inference_perf.reportgen.br.v0_2 import build_partial_report, generate_experiment_eid, generate_run_uid
+
+            br_stage_buckets: dict[int, List[RequestLifecycleMetric]] = defaultdict(list)
+            for metric in request_metrics:
+                if metric.stage_id is not None:
+                    br_stage_buckets[metric.stage_id].append(metric)
+            # One eid for the whole invocation: run.eid is what lets a
+            # composer group the per-stage partials as a single experiment.
+            br_run_eid = generate_experiment_eid()
+            for br_stage_id in sorted(set(br_stage_buckets) | session_stage_ids):
+                # run.time needs the stage's wall-clock window: the request
+                # timestamps are monotonic and can't be mapped to epoch here.
+                stage_info = runtime_parameters.stages.get(br_stage_id)
+                partial = build_partial_report(
+                    br_stage_buckets.get(br_stage_id, []),
+                    tokenizer,
+                    run_uid=generate_run_uid(br_stage_id),
+                    run_eid=br_run_eid,
+                    use_server_output_tokens=use_server_output_tokens,
+                    stage_start=stage_info.start_time if stage_info else None,
+                    stage_end=stage_info.end_time if stage_info else None,
+                    session_metrics=session_metrics_by_stage.get(br_stage_id, []),
+                    sessions_not_completed=(
+                        stage_info.sessions_not_completed_active + stage_info.sessions_not_completed_pending
+                        if stage_info
+                        else 0
+                    ),
+                )
+                lifecycle_reports.append(
+                    ReportFile(
+                        name=f"inference-perf.partial.stage_{br_stage_id}",
+                        file_type="yaml",
+                        contents=partial,
+                    )
+                )
 
         # Session-level reports (OTel agentic workloads only)
         if self.session_metrics_collector and report_config.session_lifecycle:
             session_reports = self.generate_session_reports(
-                self.session_metrics_collector.get_metrics(),
+                session_metrics,
                 report_config.session_lifecycle,
                 percentiles,
+                runtime_parameters,
+                max_error_messages,
             )
             lifecycle_reports.extend(session_reports)
 
         lifecycle_reports.append(self.generate_config_report())
+
+        # Validate the assembled report set and emit the findings as their own
+        # validation.json report. Validation never takes down report emission
+        # and never fails the run: errors mean the report set is internally
+        # inconsistent (a bug in inference-perf), and they surface in the logs
+        # and in validation.json for test tiers to assert on.
+        try:
+            from inference_perf.reportgen.validation import validate_reports
+
+            lifecycle_reports.append(validate_reports(lifecycle_reports))
+        except Exception:
+            logger.exception("Report validation failed; continuing without validation report")
+
         return lifecycle_reports
 
-    def summarize_sessions(self, metrics: List[SessionLifecycleMetric], percentiles: List[float]) -> Dict[str, Any]:
+    def summarize_sessions(
+        self,
+        metrics: List[SessionLifecycleMetric],
+        stage_infos: Iterable[StageRuntimeInfo],
+        percentiles: List[float],
+        max_error_messages: int = 100,
+    ) -> Dict[str, Any]:
         """Compute aggregated stats across a list of session lifecycle metrics."""
-        num_sessions = len(metrics)
+        num_sessions_recorded = len(metrics)
         num_succeeded = sum(1 for m in metrics if m.success is True)
         num_failed = sum(1 for m in metrics if m.success is False)
+        # Sessions cut short at the stage boundary. Their success is left None by
+        # _enrich_sessions so they fall out of both counts above, and their duration is
+        # censored (we know the session ran at least that long, not how long it takes)
+        # so it is excluded from the percentiles below. Event and token aggregates stay
+        # inclusive: those events really did complete.
+        completed_metrics = [m for m in metrics if not m.truncated]
+        num_sessions_completed = len(completed_metrics)
+        # A stranded active session reaches us two ways, and they overlap rather than add.
+        # A stage that stopped at its duration records each straggler as a truncated row and
+        # counts it; a stage killed by max_stage_duration cancels its stragglers and can only
+        # count them, because there is no row to record. So take whichever view is larger:
+        # summing would count every truncated row twice, and using the counter alone would
+        # lose rows if a caller reports none.
+        sessions_not_completed_active = max(
+            sum(s.sessions_not_completed_active for s in stage_infos),
+            num_sessions_recorded - num_sessions_completed,
+        )
+        sessions_not_completed_pending = sum(s.sessions_not_completed_pending for s in stage_infos)
+        sessions_not_completed = sessions_not_completed_active + sessions_not_completed_pending
         total_events = sum(m.num_events for m in metrics)
         total_events_completed = sum(m.num_events_completed for m in metrics)
         total_events_cancelled = sum(m.num_events_cancelled for m in metrics if m.num_events_cancelled is not None)
+        # Bad tool-call handling: sum across sessions where the worker
+        # exercised the substitution path. Sessions with handling=none
+        # contribute None and are skipped, so a default-config run
+        # surfaces 0 sessions and a `null` total in the report.
+        # Sessions that hit at least one retryable transport fault, and the totals
+        # behind them. Omitted entirely when nothing retried, so a run with
+        # request_retries at its default serializes byte-identically to one built
+        # before retries existed; both readers in cli_summary default to 0.
+        retry_summary: dict[str, Any] = {}
+        if any(m.retries_attempted for m in metrics):
+            retry_summary = {
+                "sessions_with_retries": sum(1 for m in metrics if m.retries_attempted > 0),
+                "total_retry_attempts": sum(m.retries_attempted for m in metrics),
+                "total_retries_recovered": sum(m.retries_recovered for m in metrics),
+            }
+
+        sessions_with_recorded_substitution = sum(
+            1 for m in metrics if m.n_recorded_substitutions is not None and m.n_recorded_substitutions > 0
+        )
+        sessions_with_substitutions = [
+            m for m in metrics if m.n_recorded_substitutions is not None and m.n_recorded_substitutions > 0
+        ]
+        # total_recorded_substitutions carries the aggregate count plus a capped
+        # sample of per-session example messages
+        total_recorded_substitutions = {
+            "count": sum(
+                m.n_recorded_substitutions for m in sessions_with_substitutions if m.n_recorded_substitutions is not None
+            ),
+            "messages": [
+                {
+                    "message": f"substitutions={m.n_recorded_substitutions} event_ids={m.recorded_substitution_event_ids}",
+                    "session_ids": [m.session_id],
+                }
+                for m in sessions_with_substitutions[:max_error_messages]
+            ],
+        }
 
         sessions_per_second = 0.0
-        if num_sessions > 0:
+        if num_sessions_recorded > 0:
             total_span = max(m.end_time for m in metrics) - min(m.start_time for m in metrics)
             if total_span > 0:
-                sessions_per_second = num_sessions / total_span
+                # A completion rate, like requests_per_sec: a truncated session never
+                # finished, so it widens the span it ran in but is not counted. Sessions
+                # started, truncated or not, are reported as num_sessions.
+                sessions_per_second = num_sessions_completed / total_span
+
+        # Bucketed on the stable cause code carried as error_type, mirroring the
+        # request-side shape from #601. Sessions counted as failed but carrying
+        # no error are surfaced under an explicit label rather than dropped, so
+        # the by_label counts always reconcile with `num_sessions_failed`.
+        failed_sessions = [m for m in metrics if m.success is False]
+        session_failures = build_error_counts(
+            [
+                (
+                    m.error.error_type if m.error is not None else "unreported",
+                    m.error.error_msg if m.error is not None else "session failed with no error recorded",
+                    m.session_id,
+                )
+                for m in failed_sessions
+            ],
+            max_error_messages,
+            label_fn=use_error_type_as_label,
+        )
+
+        # Per-session KV/prefix cache hit rate = cached / total server-reported
+        # prompt tokens. Both sides come from the same server usage dicts (see
+        # extract_cached_prompt_tokens) rather than pairing the server numerator
+        # with the client-side total_input_tokens. Only sessions that reported
+        # cache info with a positive prompt-token count contribute; the rest are
+        # skipped so a missing/None field never becomes a misleading 0.0.
+        kv_cache_hit_per_session_percent = [
+            100.0 * m.total_cached_tokens / m.total_cacheable_input_tokens
+            for m in metrics
+            if m.total_cached_tokens is not None and m.total_cacheable_input_tokens
+        ]
+        cached_total = sum(m.total_cached_tokens for m in metrics if m.total_cached_tokens is not None)
+        prompt_total = sum(m.total_cacheable_input_tokens for m in metrics if m.total_cacheable_input_tokens is not None)
+        kv_cache_hit_percent = (100.0 * cached_total / prompt_total) if prompt_total else None
+
+        # TFUT summary
+        tfut_values = [m.tfut_sec for m in metrics if m.tfut_sec is not None]
+        sessions_with_tfut = len(tfut_values)
+        tfut_none_reasons: dict[str, int] = defaultdict(int)
+        for m in metrics:
+            if m.tfut_none_reason:
+                tfut_none_reasons[m.tfut_none_reason] += 1
+        num_uf_events_values = [float(len(m.user_facing_event_ids)) for m in metrics if m.user_facing_event_ids is not None]
+        structured_output_excluded_values = [
+            float(m.num_structured_output_excluded) for m in metrics if m.num_structured_output_excluded is not None
+        ]
 
         return {
-            "num_sessions": num_sessions,
+            "num_sessions": num_sessions_completed + sessions_not_completed,
+            "num_sessions_completed": num_sessions_completed,
             "num_sessions_succeeded": num_succeeded,
             "num_sessions_failed": num_failed,
+            "num_sessions_not_completed": sessions_not_completed,
+            "num_sessions_not_completed_active": sessions_not_completed_active,
+            "num_sessions_not_completed_pending": sessions_not_completed_pending,
+            "failures": {
+                "count": num_failed,
+                "by_label": session_failures,
+            },
             "total_events": total_events,
             "total_events_completed": total_events_completed,
             "total_events_cancelled": total_events_cancelled,
+            "sessions_with_recorded_substitution": sessions_with_recorded_substitution,
+            "total_recorded_substitutions": total_recorded_substitutions,
+            **retry_summary,
             "sessions_per_second": sessions_per_second,
-            "session_duration_sec": summarize([m.duration_sec for m in metrics], percentiles),
+            "session_duration_sec": summarize([m.duration_sec for m in completed_metrics], percentiles),
             "num_events": summarize([float(m.num_events) for m in metrics], percentiles),
             "num_events_cancelled": summarize(
                 [float(m.num_events_cancelled) for m in metrics if m.num_events_cancelled is not None], percentiles
@@ -724,29 +1467,185 @@ class ReportGenerator:
             "total_output_tokens": summarize(
                 [float(m.total_output_tokens) for m in metrics if m.total_output_tokens is not None], percentiles
             ),
+            "total_cached_tokens": summarize(
+                [float(m.total_cached_tokens) for m in metrics if m.total_cached_tokens is not None], percentiles
+            ),
+            "total_cacheable_input_tokens": summarize(
+                [float(m.total_cacheable_input_tokens) for m in metrics if m.total_cacheable_input_tokens is not None],
+                percentiles,
+            ),
+            "sessions_with_cache_info": sum(
+                1 for m in metrics if m.total_cached_tokens is not None and m.total_cacheable_input_tokens
+            ),
+            "kv_cache_hit_percent": kv_cache_hit_percent,
+            "kv_cache_hit_per_session_percent": summarize(kv_cache_hit_per_session_percent, percentiles),
+            "tfut_sec": summarize(tfut_values, percentiles),
+            "sessions_with_tfut": sessions_with_tfut,
+            "tfut_none_reasons": dict(tfut_none_reasons) if tfut_none_reasons else None,
+            "num_user_facing_events": summarize(num_uf_events_values, percentiles),
+            "num_structured_output_excluded": summarize(structured_output_excluded_values, percentiles),
         }
+
+    def _enrich_sessions(
+        self,
+        session_metrics: List[SessionLifecycleMetric],
+        request_metrics: List[RequestLifecycleMetric],
+        use_server_output_tokens: bool = False,
+    ) -> None:
+        """Aggregate per-request token totals, error status, and TFUT onto each session.
+
+        Mutates each ``SessionLifecycleMetric`` in ``session_metrics`` in place,
+        setting ``total_input_tokens``, ``total_output_tokens``,
+        ``total_cached_tokens``, ``error``, ``success``, and TFUT fields from the matching
+        request-level metrics.
+        """
+        token_by_session: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
+        error_by_session: dict[str, Any] = {}
+        # session_id -> (extra attempts spent, requests that recovered via retry)
+        retry_by_session: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
+        # session_id -> (summed cached prompt tokens, summed server prompt tokens),
+        # or absent when no request in the session reported cache info. Absence is
+        # preserved as None on the session (not coerced to 0) so a session with no
+        # cache info is distinguishable from one that had usage but zero cached
+        # tokens. Numerator and denominator accumulate over exactly the same
+        # requests so the ratio never mixes sources.
+        cache_by_session: dict[str, tuple[int, int]] = {}
+        # Index requests by (session_id, event_id) for TFUT lookup
+        requests_by_session_event: dict[str, dict[str, RequestLifecycleMetric]] = defaultdict(dict)
+
+        for m in request_metrics:
+            if m.session_id:
+                inp, out = token_by_session[m.session_id]
+                token_by_session[m.session_id] = (
+                    inp + m.info.request_metrics.text.input_tokens,
+                    out + effective_output_tokens(m.info.response_metrics, use_server_output_tokens),
+                )
+                if m.session_id not in error_by_session and m.error is not None:
+                    error_by_session[m.session_id] = m.error
+                if m.info.retries_attempted:
+                    prev_attempted, prev_recovered = retry_by_session[m.session_id]
+                    retry_by_session[m.session_id] = (
+                        prev_attempted + m.info.retries_attempted,
+                        prev_recovered + (1 if m.info.retries_recovered else 0),
+                    )
+                event_id = m.info.graph_event_id
+                if event_id:
+                    requests_by_session_event[m.session_id][event_id] = m
+
+                if m.error is None:
+                    response_metrics = m.info.response_metrics
+                    server_usage = response_metrics.server_usage if response_metrics else None
+                    cache_usage = extract_cached_prompt_tokens(server_usage)
+                    if cache_usage is not None:
+                        cached, prompt = cache_usage
+                        prev_cached, prev_prompt = cache_by_session.get(m.session_id, (0, 0))
+                        cache_by_session[m.session_id] = (prev_cached + cached, prev_prompt + prompt)
+
+        for sm in session_metrics:
+            inp, out = token_by_session.get(sm.session_id, (0, 0))
+            sm.total_input_tokens = inp
+            sm.total_output_tokens = out
+            cache_usage = cache_by_session.get(sm.session_id)
+            sm.total_cached_tokens = cache_usage[0] if cache_usage else None
+            sm.total_cacheable_input_tokens = cache_usage[1] if cache_usage else None
+            sm.retries_attempted, sm.retries_recovered = retry_by_session.get(sm.session_id, (0, 0))
+            request_error = error_by_session.get(sm.session_id)
+            # The session's own replay error is the more specific diagnosis and
+            # takes precedence; a request-level error only fills the gap when
+            # the session recorded no cause of its own.
+            if request_error is not None and sm.error is None:
+                sm.error = request_error
+            # A session cut short at the stage boundary has incomplete events by
+            # construction, so the rule below would mark it failed for something the
+            # server did not do. None keeps it out of both num_sessions_succeeded and
+            # num_sessions_failed, which test `is True` / `is False`; it is reported
+            # under num_sessions_not_completed_active instead.
+            sm.success = None if sm.truncated else ((sm.num_events_completed == sm.num_events) and (sm.error is None))
+
+            # Compute TFUT
+            ReportGenerator._compute_tfut(sm, requests_by_session_event.get(sm.session_id, {}))
+
+    @staticmethod
+    def _compute_tfut(
+        sm: SessionLifecycleMetric,
+        event_requests: dict[str, "RequestLifecycleMetric"],
+    ) -> None:
+        """Compute Time to First User Token for a single session.
+        TFUT = time from session dispatch to the first output token on the
+        earliest user-facing event (measured on the same monotonic clock).
+        """
+        uf_event_ids = sm.user_facing_event_ids
+        if not uf_event_ids:
+            sm.tfut_none_reason = "no_user_facing"
+            return
+
+        # dispatch_perf_counter is the monotonic anchor for all TFUT math
+        if sm.dispatch_perf_counter is None:
+            sm.tfut_none_reason = "no_dispatch_anchor"
+            return
+
+        candidates: List[float] = []
+        has_non_streaming = False
+        has_no_output_tokens = False
+
+        # Collect TFUT from each user-facing event that has token timestamps
+        for eid in uf_event_ids:
+            req = event_requests.get(eid)
+            if req is None:
+                continue
+            response_metrics = req.info.response_metrics
+            if not isinstance(response_metrics, StreamedResponseMetrics):
+                has_non_streaming = True
+                continue
+            # User-visible means content: reasoning tokens are in
+            # output_token_times but never reach the user (#559).
+            first_content = first_content_token_time(response_metrics)
+            if first_content is None:
+                has_no_output_tokens = True
+                continue
+            tfut = first_content - sm.dispatch_perf_counter
+            candidates.append(tfut)
+
+        # TFUT is the minimum across user-facing events (earliest user-visible output)
+        if candidates:
+            sm.tfut_sec = min(candidates)
+        elif has_non_streaming:
+            sm.tfut_none_reason = "non_streaming"
+        elif has_no_output_tokens:
+            sm.tfut_none_reason = "no_output_tokens"
+        else:
+            sm.tfut_none_reason = "no_user_facing"
 
     def generate_session_reports(
         self,
         session_metrics: List[SessionLifecycleMetric],
         report_config: SessionLifecycleReportConfig,
         percentiles: List[float],
+        runtime_parameters: PerfRuntimeParameters,
+        max_error_messages: int,
     ) -> List[ReportFile]:
-        """Generate session-level lifecycle reports.
-
-        Note: Session metrics should be enriched (via SessionMetricsCollector.enrich_metrics())
-        before calling this method.
-        """
+        """Generate session-level lifecycle reports."""
         reports: List[ReportFile] = []
 
-        if not session_metrics:
+        any_stranded_sessions = any(
+            s.sessions_not_completed_active or s.sessions_not_completed_pending for s in runtime_parameters.stages.values()
+        )
+        if not session_metrics and not any_stranded_sessions:
             return reports
 
         if report_config.summary:
+            stage_infos = runtime_parameters.stages.values()
+            summary = self.summarize_sessions(
+                metrics=session_metrics,
+                stage_infos=stage_infos,
+                percentiles=percentiles,
+                max_error_messages=max_error_messages,
+            )
+
             reports.append(
                 ReportFile(
                     name="summary_session_lifecycle_metrics",
-                    contents=self.summarize_sessions(session_metrics, percentiles),
+                    contents=summary,
                 )
             )
 
@@ -754,11 +1653,50 @@ class ReportGenerator:
             stage_buckets: dict[int, List[SessionLifecycleMetric]] = defaultdict(list)
             for m in session_metrics:
                 stage_buckets[m.stage_id].append(m)
+            # A stage that was entirely stranded (max_stage_duration fired before any
+            # session finished) has no bucket from session_metrics; add it so its
+            # sessions_not_completed counts are still reported.
+            for stage_id, stage_runtime_info in runtime_parameters.stages.items():
+                if stage_id not in stage_buckets and (
+                    stage_runtime_info.sessions_not_completed_active or stage_runtime_info.sessions_not_completed_pending
+                ):
+                    stage_buckets[stage_id] = []
             for stage_id, stage_metrics in stage_buckets.items():
+                # Get stage runtime info and build metadata
+                stage_info = runtime_parameters.stages.get(stage_id)
+                stage_summary = self.summarize_sessions(
+                    metrics=stage_metrics,
+                    stage_infos=[stage_info] if stage_info else [],
+                    percentiles=percentiles,
+                    max_error_messages=max_error_messages,
+                )
+
+                if stage_info:
+                    # The status is recorded at the point the stage actually terminated
+                    # (see load_generator.py), not inferred here from durations.
+                    status_str = _STAGE_STATUS_LABELS.get(stage_info.status, "FAILED")
+
+                    # Build stage metadata
+                    stage_metadata = {
+                        "stage_id": stage_id,
+                        "status": status_str,
+                        "max_stage_duration_configured": stage_info.max_stage_duration,
+                        "duration_configured": stage_info.duration,
+                        "actual_duration": stage_info.end_time - stage_info.start_time,
+                        "teardown_duration": stage_info.teardown_duration,
+                        "dropped_requests": stage_info.dropped_requests,
+                        "dropped_requests_exact": stage_info.dropped_requests_exact,
+                        "concurrent_sessions": stage_info.concurrency_level,
+                        "session_rate": stage_info.rate if stage_info.rate > 0 else None,
+                    }
+
+                    # Insert stage_metadata as first key
+                    stage_summary = {"stage_metadata": stage_metadata, **stage_summary}
+
                 reports.append(
                     ReportFile(
                         name=f"stage_{stage_id}_session_lifecycle_metrics",
-                        contents=self.summarize_sessions(stage_metrics, percentiles),
+                        contents=stage_summary,
                     )
                 )
 

@@ -23,6 +23,7 @@ class BaseGenerator(ABC):
 
     api_config: APIConfig
     tokenizer: Optional[CustomTokenizer]
+    config: DataConfig
 
     def __init__(self, api_config: APIConfig, config: DataConfig, tokenizer: Optional[CustomTokenizer]) -> None:
         """Initialize base generator with common attributes.
@@ -38,6 +39,7 @@ class BaseGenerator(ABC):
 
         self.api_config = api_config
         self.tokenizer = tokenizer
+        self.config = config
 
     @abstractmethod
     def get_supported_apis(self) -> List[APIType]:
@@ -50,6 +52,17 @@ class BaseGenerator(ABC):
         Returns False by default. Override to enable worker affinity.
         """
         return False
+
+    def preferred_worker_count(self) -> Optional[int]:
+        """How many distinct preferred worker ids this generator emits.
+
+        Only read when is_preferred_worker_requested() is True. The load
+        generator splits concurrency_level across at most this many workers,
+        so pinned routing never strands part of the level on workers the
+        pins cannot reach. None means unknown, and the split falls back to
+        num_workers.
+        """
+        return None
 
 
 class DataGenerator(BaseGenerator):
@@ -125,6 +138,15 @@ class SessionGenerator(BaseGenerator):
         """Return total number of sessions available for replay."""
         raise NotImplementedError
 
+    def supports_corpus_cycling(self) -> bool:
+        """Whether session indices past get_session_count() resolve to further sessions.
+
+        A duration-bounded stage draws sessions until its deadline rather than running a
+        fixed slice, so it needs supply past the loaded set. Generators that cannot do that
+        leave this False, and such a stage simply ends when the corpus does.
+        """
+        return False
+
     @abstractmethod
     def get_session_info(self, session_index: int) -> Dict[str, Any]:
         """Get metadata about a specific session.
@@ -183,6 +205,14 @@ class SessionGenerator(BaseGenerator):
             True if all events in the session have completed
         """
         raise NotImplementedError
+
+    def session_end_perf_counter(self, session_id: str) -> Optional[float]:
+        """perf_counter at which the session's last activity landed, success or failure.
+
+        Lets a session that finishes during stage teardown report when it really ended,
+        rather than the stage boundary. None when the generator does not track it.
+        """
+        return None
 
     @abstractmethod
     def build_session_metric(

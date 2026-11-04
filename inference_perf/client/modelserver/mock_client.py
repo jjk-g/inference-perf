@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from inference_perf.client.requestdatacollector import RequestDataCollector
+from inference_perf.metrics.request_collector import RequestMetricCollector
 from typing import List, Optional
 from inference_perf.config import APIConfig, APIType
 from inference_perf.apis import (
@@ -20,9 +20,11 @@ from inference_perf.apis import (
     InferenceInfo,
     RequestLifecycleMetric,
     ErrorResponseInfo,
-    UnaryInferenceResponseInfo,
+    UnaryResponseMetrics,
 )
-from .base import ModelServerClient, ModelServerPrometheusMetric, PrometheusMetricMetadata
+from inference_perf.payloads import RequestMetrics, Text
+from .base import ModelServerClient
+from .metrics import BaseMetrics
 import asyncio
 import time
 import logging
@@ -33,12 +35,21 @@ logger = logging.getLogger(__name__)
 class MockModelServerClient(ModelServerClient):
     def __init__(
         self,
-        metrics_collector: RequestDataCollector,
+        metrics_collector: RequestMetricCollector,
         api_config: APIConfig,
         timeout: Optional[float] = None,
         mock_latency: float = 1,
+        request_retries: int = 0,
+        request_retry_backoff_sec: float = 0.5,
     ) -> None:
-        super().__init__(api_config, timeout)
+        # Accepted for signature parity with the real clients; the mock never makes a
+        # network call, so there is no transport fault to retry.
+        super().__init__(
+            api_config,
+            timeout,
+            request_retries=request_retries,
+            request_retry_backoff_sec=request_retry_backoff_sec,
+        )
         self.metrics_collector = metrics_collector
         self.mock_latency = mock_latency
         self.tokenizer = None
@@ -58,18 +69,17 @@ class MockModelServerClient(ModelServerClient):
                     await asyncio.sleep(self.mock_latency)
 
                 info = InferenceInfo(
-                    input_tokens=0,
-                    output_tokens=0,
+                    request_metrics=RequestMetrics(text=Text(input_tokens=0)),
                     lora_adapter=lora_adapter,
                 )
                 data.on_completion(info)
                 self.metrics_collector.record_metric(
                     RequestLifecycleMetric(
                         stage_id=stage_id,
-                        request_data=str(await data.to_payload(effective_model_name, 3, False, False)),
+                        request_data=str(await data.to_request_body(effective_model_name, 3, False, False)),
                         info=InferenceInfo(
-                            input_tokens=0,
-                            response_info=UnaryInferenceResponseInfo(output_tokens=0),
+                            request_metrics=RequestMetrics(text=Text(input_tokens=0)),
+                            response_metrics=UnaryResponseMetrics(output_tokens=0),
                             lora_adapter=lora_adapter,
                         ),
                         error=None,
@@ -83,10 +93,10 @@ class MockModelServerClient(ModelServerClient):
             self.metrics_collector.record_metric(
                 RequestLifecycleMetric(
                     stage_id=stage_id,
-                    request_data=str(data.to_payload(effective_model_name, 3, False, False)),
+                    request_data=str(data.to_request_body(effective_model_name, 3, False, False)),
                     info=InferenceInfo(
-                        input_tokens=0,
-                        response_info=UnaryInferenceResponseInfo(output_tokens=0),
+                        request_metrics=RequestMetrics(text=Text(input_tokens=0)),
+                        response_metrics=UnaryResponseMetrics(output_tokens=0),
                         lora_adapter=lora_adapter,
                     ),
                     error=ErrorResponseInfo(
@@ -100,114 +110,7 @@ class MockModelServerClient(ModelServerClient):
             )
 
     def get_supported_apis(self) -> List[APIType]:
-        return [APIType.Completion, APIType.Chat]
+        return [APIType.Completion, APIType.Chat, APIType.AnthropicMessages, APIType.Embeddings, APIType.Rerank]
 
-    def get_prometheus_metric_metadata(self) -> PrometheusMetricMetadata:
-        mock_prometheus_metric = ModelServerPrometheusMetric(
-            name="mock_metric",
-            op="mean",
-            type="counter",
-            filters=[],
-        )
-        return PrometheusMetricMetadata(
-            # Throughput
-            prompt_tokens_per_second=mock_prometheus_metric,
-            output_tokens_per_second=mock_prometheus_metric,
-            requests_per_second=mock_prometheus_metric,
-            # Latency
-            avg_request_latency=mock_prometheus_metric,
-            median_request_latency=mock_prometheus_metric,
-            p90_request_latency=mock_prometheus_metric,
-            p99_request_latency=mock_prometheus_metric,
-            # Request
-            total_requests=mock_prometheus_metric,
-            avg_prompt_tokens=mock_prometheus_metric,
-            avg_output_tokens=mock_prometheus_metric,
-            avg_queue_length=mock_prometheus_metric,
-            # Others
-            avg_time_to_first_token=None,
-            median_time_to_first_token=None,
-            p90_time_to_first_token=None,
-            p99_time_to_first_token=None,
-            avg_time_per_output_token=None,
-            median_time_per_output_token=None,
-            p90_time_per_output_token=None,
-            p99_time_per_output_token=None,
-            avg_inter_token_latency=None,
-            median_inter_token_latency=None,
-            p90_inter_token_latency=None,
-            p99_inter_token_latency=None,
-            avg_kv_cache_usage=None,
-            median_kv_cache_usage=None,
-            p90_kv_cache_usage=None,
-            p99_kv_cache_usage=None,
-            num_preemptions_total=None,
-            num_requests_swapped=None,
-            prefix_cache_hits=None,
-            prefix_cache_queries=None,
-            avg_num_requests_running=None,
-            avg_request_queue_time=None,
-            median_request_queue_time=None,
-            p90_request_queue_time=None,
-            p99_request_queue_time=None,
-            avg_request_inference_time=None,
-            median_request_inference_time=None,
-            p90_request_inference_time=None,
-            p99_request_inference_time=None,
-            avg_request_prefill_time=None,
-            median_request_prefill_time=None,
-            p90_request_prefill_time=None,
-            p99_request_prefill_time=None,
-            avg_request_decode_time=None,
-            median_request_decode_time=None,
-            p90_request_decode_time=None,
-            p99_request_decode_time=None,
-            avg_request_prompt_tokens=None,
-            median_request_prompt_tokens=None,
-            p90_request_prompt_tokens=None,
-            p99_request_prompt_tokens=None,
-            avg_request_generation_tokens=None,
-            median_request_generation_tokens=None,
-            p90_request_generation_tokens=None,
-            p99_request_generation_tokens=None,
-            avg_request_max_num_generation_tokens=None,
-            median_request_max_num_generation_tokens=None,
-            p90_request_max_num_generation_tokens=None,
-            p99_request_max_num_generation_tokens=None,
-            avg_request_params_n=None,
-            median_request_params_n=None,
-            p90_request_params_n=None,
-            p99_request_params_n=None,
-            avg_request_params_max_tokens=None,
-            median_request_params_max_tokens=None,
-            p90_request_params_max_tokens=None,
-            p99_request_params_max_tokens=None,
-            request_success_count=None,
-            avg_iteration_tokens=None,
-            median_iteration_tokens=None,
-            p90_iteration_tokens=None,
-            p99_iteration_tokens=None,
-            prompt_tokens_cached=None,
-            prompt_tokens_recomputed=None,
-            external_prefix_cache_hits=None,
-            external_prefix_cache_queries=None,
-            mm_cache_hits=None,
-            mm_cache_queries=None,
-            corrupted_requests=None,
-            avg_request_prefill_kv_computed_tokens=None,
-            median_request_prefill_kv_computed_tokens=None,
-            p90_request_prefill_kv_computed_tokens=None,
-            p99_request_prefill_kv_computed_tokens=None,
-            avg_kv_block_idle_before_evict=None,
-            median_kv_block_idle_before_evict=None,
-            p90_kv_block_idle_before_evict=None,
-            p99_kv_block_idle_before_evict=None,
-            avg_kv_block_lifetime=None,
-            median_kv_block_lifetime=None,
-            p90_kv_block_lifetime=None,
-            p99_kv_block_lifetime=None,
-            avg_kv_block_reuse_gap=None,
-            median_kv_block_reuse_gap=None,
-            p90_kv_block_reuse_gap=None,
-            p99_kv_block_reuse_gap=None,
-        )
+    def get_prometheus_metric_metadata(self) -> BaseMetrics:
+        return BaseMetrics()

@@ -11,9 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import logging
 import multiprocessing as mp
 import sys
 from argparse import ArgumentParser
+
+import yaml
 from inference_perf.analysis.analyze import analyze_reports
 from typing import List, Optional
 from inference_perf.client.modelserver.tgi_client import TGImodelServerClient
@@ -21,12 +25,14 @@ from inference_perf.datagen.base import BaseGenerator
 from inference_perf.loadgen import LoadGenerator
 from inference_perf.metrics import SessionMetricsCollector
 from inference_perf.config import (
+    APIType,
     Config,
     DataGenType,
     LoadType,
     MetricsClientType,
     ModelServerType,
     ReportConfig,
+    RuntimeMetricsConfig,
     StandardLoadStage,
     ConcurrentLoadStage,
     read_config,
@@ -35,13 +41,17 @@ from inference_perf.datagen import (
     MockDataGenerator,
     HFShareGPTDataGenerator,
     SyntheticDataGenerator,
+    MultimodalDataGenerator,
     RandomDataGenerator,
     SharedPrefixDataGenerator,
     CNNDailyMailDataGenerator,
     InfinityInstructDataGenerator,
     BillsumConversationsDataGenerator,
     OTelTraceReplayDataGenerator,
+    WekaTraceReplayDataGenerator,
+    SyntheticAgenticDataGenerator,
     ConversationReplayDataGenerator,
+    VisionArenaDataGenerator,
 )
 from inference_perf.client.modelserver import (
     ModelServerClient,
@@ -49,26 +59,62 @@ from inference_perf.client.modelserver import (
     SGlangModelServerClient,
     MockModelServerClient,
 )
-from inference_perf.client.metricsclient.base import MetricsClient, PerfRuntimeParameters
-from inference_perf.client.metricsclient.prometheus_client import PrometheusMetricsClient, GoogleManagedPrometheusMetricsClient
+from inference_perf.client.server_metrics.base import ServerMetricsClient, PerfRuntimeParameters
+from inference_perf.client.server_metrics.prometheus_client import (
+    PrometheusMetricsClient,
+    GoogleManagedPrometheusMetricsClient,
+)
 from inference_perf.client.filestorage import (
     StorageClient,
     GoogleCloudStorageClient,
     LocalStorageClient,
     SimpleStorageServiceClient,
 )
-from inference_perf.client.requestdatacollector import (
-    RequestDataCollector,
-    LocalRequestDataCollector,
-    MultiprocessRequestDataCollector,
+from inference_perf.metrics.request_collector import (
+    RequestMetricCollector,
+    LocalRequestMetricCollector,
+    MultiprocessRequestMetricCollector,
 )
-from inference_perf.circuit_breaker import init_circuit_breakers
+from inference_perf.circuit_breaker import feed_breakers, init_circuit_breakers
+from inference_perf.observability.metrics import PrometheusMetricsServer, RunContext, build_metrics
 from inference_perf.reportgen import ReportGenerator
-from inference_perf.utils import CustomTokenizer, ReportFile, add_pydantic_args, unflatten_dict
+from inference_perf.utils import CustomTokenizer, ReportFile, add_global_args, add_pydantic_args, unflatten_dict
 from inference_perf.utils.cli_summary import print_summary_table
-from inference_perf.logger import setup_logging
+from inference_perf.observability.logging import setup_logging
 import asyncio
 import time
+
+logger = logging.getLogger(__name__)
+
+
+def sync_tokenizer_config(config: Config, client: ModelServerClient) -> None:
+    """Copy the tokenizer a client resolved back into the run config.
+
+    Report generation builds its own tokenizer from ``config.tokenizer``
+    (ReportGenerator._build_tokenizer), so a run that let the client resolve one -- a
+    detected model name, or the ``/v1/models`` entry's ``root`` behind a served alias --
+    would otherwise report with no tokenizer and silently skip the streamed
+    token-timing correction. A config that already pins a path is left alone.
+    """
+    if config.tokenizer is not None and config.tokenizer.pretrained_model_name_or_path:
+        return
+    if client.tokenizer_config is not None:
+        config.tokenizer = client.tokenizer_config
+
+
+def log_metrics_endpoint_failure(metrics_config: RuntimeMetricsConfig, error: OSError) -> None:
+    """Report a metrics endpoint that would not bind, without failing the run.
+
+    Observability must not fail the run it observes: the benchmark and its
+    reports are unaffected, only the scrape endpoint is missing. It is still an
+    error, since the endpoint only runs when someone asked for it.
+    """
+    logger.error(
+        "Could not start the runtime metrics endpoint on port %d: %s. The run continues without it. "
+        "Set observability.metrics.port to choose another port.",
+        metrics_config.port,
+        error,
+    )
 
 
 class InferencePerfRunner:
@@ -116,13 +162,7 @@ def main_cli() -> None:
 
     # Parse command line arguments
     parser = ArgumentParser()
-    parser.add_argument("-c", "--config_file", help="Config File", required=False)
-    parser.add_argument("-a", "--analyze", nargs="*", help="Path to a report directories to analyze", required=False)
-    parser.add_argument("-u", "--unified_analysis_dir", help="Unified analysis directory path", required=False)
-    parser.add_argument(
-        "--log-level", help="Logging level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-    )
-
+    base_args = add_global_args(parser)
     add_pydantic_args(parser, Config)
 
     args = parser.parse_args()
@@ -133,7 +173,6 @@ def main_cli() -> None:
         analyze_reports(args.analyze, args.unified_analysis_dir)
         return
 
-    base_args = {"config_file", "analyze", "unified_analysis_dir", "log_level"}
     cli_overrides_flat = {k: v for k, v in vars(args).items() if k not in base_args}
     cli_overrides = unflatten_dict(cli_overrides_flat)
 
@@ -157,7 +196,7 @@ def main_cli() -> None:
         init_circuit_breakers(config.circuit_breakers)
 
     # Define Metrics Client
-    metrics_client: Optional[MetricsClient] = None
+    metrics_client: Optional[ServerMetricsClient] = None
     if config.metrics:
         if config.metrics.type == MetricsClientType.PROMETHEUS and config.metrics.prometheus:
             if config.metrics.prometheus.google_managed:
@@ -176,12 +215,20 @@ def main_cli() -> None:
             storage_clients.append(SimpleStorageServiceClient(config=config.storage.simple_storage_service))
 
     # Define Report Generator
-    collector: RequestDataCollector
+    collector: RequestMetricCollector
     if config.load.num_workers > 0:
-        collector = MultiprocessRequestDataCollector()
+        collector = MultiprocessRequestMetricCollector()
     else:
-        collector = LocalRequestDataCollector()
+        collector = LocalRequestMetricCollector()
+    if config.circuit_breakers:
+        collector.add_observer(feed_breakers)
     reportgen = ReportGenerator(metrics_client, collector, config=config)
+
+    # Runtime metrics inference-perf exports about itself. The hub always runs
+    # in-process (it feeds the collector observer and stage hooks); the HTTP
+    # exposition endpoint starts only when observability.metrics is set.
+    metrics_hub = build_metrics(config)
+    collector.add_observer(metrics_hub.observe_request)
 
     # Create tokenizer based on tokenizer config
     tokenizer: Optional[CustomTokenizer] = None
@@ -194,6 +241,9 @@ def main_cli() -> None:
     # Define Model Server Client
     model_server_client: ModelServerClient
     if config.server:
+        # Resolved once here, at the boundary between the config and the clients:
+        # the config holds the key as a secret, the client sends it as a header.
+        api_key = config.server.api_key.get_secret_value() if config.server.api_key else None
         if config.server.type == ModelServerType.VLLM:
             model_server_client = vLLMModelServerClient(
                 reportgen.get_metrics_collector(),
@@ -204,8 +254,10 @@ def main_cli() -> None:
                 ignore_eos=config.server.ignore_eos,
                 max_tcp_connections=config.load.worker_max_tcp_connections,
                 additional_filters=config.metrics.prometheus.filters if config.metrics and config.metrics.prometheus else [],
-                api_key=config.server.api_key,
+                api_key=api_key,
                 timeout=config.load.request_timeout,
+                request_retries=config.load.request_retries,
+                request_retry_backoff_sec=config.load.request_retry_backoff_sec,
                 cert_path=config.server.cert_path,
                 key_path=config.server.key_path,
                 lora_config=config.load.lora_traffic_split,
@@ -222,8 +274,12 @@ def main_cli() -> None:
                 ignore_eos=config.server.ignore_eos,
                 max_tcp_connections=config.load.worker_max_tcp_connections,
                 additional_filters=config.metrics.prometheus.filters if config.metrics and config.metrics.prometheus else [],
-                api_key=config.server.api_key,
+                api_key=api_key,
                 timeout=config.load.request_timeout,
+                request_retries=config.load.request_retries,
+                request_retry_backoff_sec=config.load.request_retry_backoff_sec,
+                cert_path=config.server.cert_path,
+                key_path=config.server.key_path,
                 lora_config=config.load.lora_traffic_split,
             )
             # sglang_client supports inferring the tokenizer
@@ -238,8 +294,12 @@ def main_cli() -> None:
                 ignore_eos=config.server.ignore_eos,
                 max_tcp_connections=config.load.worker_max_tcp_connections,
                 additional_filters=config.metrics.prometheus.filters if config.metrics and config.metrics.prometheus else [],
-                api_key=config.server.api_key,
+                api_key=api_key,
                 timeout=config.load.request_timeout,
+                request_retries=config.load.request_retries,
+                request_retry_backoff_sec=config.load.request_retry_backoff_sec,
+                cert_path=config.server.cert_path,
+                key_path=config.server.key_path,
                 lora_config=config.load.lora_traffic_split,
             )
             # tgi_client supports inferring the tokenizer
@@ -249,10 +309,15 @@ def main_cli() -> None:
                 reportgen.get_metrics_collector(),
                 api_config=config.api,
                 timeout=config.load.request_timeout,
+                request_retries=config.load.request_retries,
+                request_retry_backoff_sec=config.load.request_retry_backoff_sec,
             )
             # Don't overwrite tokenizer if mock client doesn't provide one
             if model_server_client.tokenizer is not None:
                 tokenizer = model_server_client.tokenizer
+        # The client resolved the run's tokenizer; report generation rebuilds its own
+        # from the config, so hand it over here.
+        sync_tokenizer_config(config, model_server_client)
     else:
         raise Exception("model server client config missing")
 
@@ -267,7 +332,11 @@ def main_cli() -> None:
     # Create multiprocessing manager for session replay datagens if needed.
     # Must be created before workers are forked.
     mp_manager = None
-    if config.data and config.data.type in (DataGenType.OTelTraceReplay,) and config.load.num_workers > 0:
+    if (
+        config.data
+        and config.data.type in (DataGenType.OTelTraceReplay, DataGenType.WekaTraceReplay, DataGenType.SyntheticAgentic)
+        and config.load.num_workers > 0
+    ):
         mp_manager = mp.Manager()
 
     datagen: BaseGenerator
@@ -282,6 +351,8 @@ def main_cli() -> None:
                 DataGenType.InfinityInstruct,
                 DataGenType.BillsumConversations,
                 DataGenType.OTelTraceReplay,
+                DataGenType.WekaTraceReplay,
+                DataGenType.SyntheticAgentic,
                 DataGenType.ConversationReplay,
             }
         ):
@@ -297,7 +368,8 @@ def main_cli() -> None:
                     raise Exception(
                         f"{config.data.type.value} data generator requires 'input_distribution' to be configured if no trace config is provided"
                     )
-                if config.data.output_distribution is None:
+                # Embeddings and rerank requests generate no output, so they need no output lengths.
+                if config.data.output_distribution is None and config.api.type not in (APIType.Embeddings, APIType.Rerank):
                     raise Exception(
                         f"{config.data.type.value} data generator requires 'output_distribution' to be configured if no trace config is provided"
                     )
@@ -315,7 +387,7 @@ def main_cli() -> None:
                     or config.data.input_distribution.total_count < total_count
                 ):
                     config.data.input_distribution.total_count = total_count
-                if (
+                if config.data.output_distribution is not None and (
                     config.data.output_distribution.total_count is None
                     or config.data.output_distribution.total_count < total_count
                 ):
@@ -327,14 +399,20 @@ def main_cli() -> None:
         if config.data.type == DataGenType.ConversationReplay and config.data.conversation_replay is None:
             raise Exception(f"{config.data.type.value} data generator requires 'conversation_replay' to be configured")
 
+        if config.data.type == DataGenType.VisionArena and config.data.visionarena is None:
+            raise Exception(f"{config.data.type.value} data generator requires 'visionarena' to be configured")
+
         if config.data.type == DataGenType.ShareGPT:
             datagen = HFShareGPTDataGenerator(config.api, config.data, tokenizer)
         elif config.data.type == DataGenType.CNNDailyMail:
             datagen = CNNDailyMailDataGenerator(config.api, config.data, tokenizer)
         elif config.data.type == DataGenType.Synthetic:
-            datagen = SyntheticDataGenerator(config.api, config.data, tokenizer)
+            if config.data.multimodal:
+                datagen = MultimodalDataGenerator(config.api, config.data, tokenizer, seed=config.load.base_seed)
+            else:
+                datagen = SyntheticDataGenerator(config.api, config.data, tokenizer, seed=config.load.base_seed)
         elif config.data.type == DataGenType.Random:
-            datagen = RandomDataGenerator(config.api, config.data, tokenizer)
+            datagen = RandomDataGenerator(config.api, config.data, tokenizer, seed=config.load.base_seed)
         elif config.data.type == DataGenType.SharedPrefix:
             datagen = SharedPrefixDataGenerator(config.api, config.data, tokenizer)
         elif config.data.type == DataGenType.ConversationReplay:
@@ -343,8 +421,18 @@ def main_cli() -> None:
             datagen = InfinityInstructDataGenerator(config.api, config.data, tokenizer)
         elif config.data.type == DataGenType.BillsumConversations:
             datagen = BillsumConversationsDataGenerator(config.api, config.data, tokenizer)
+        elif config.data.type == DataGenType.VisionArena:
+            datagen = VisionArenaDataGenerator(config.api, config.data, tokenizer)
         elif config.data.type == DataGenType.OTelTraceReplay:
             datagen = OTelTraceReplayDataGenerator(
+                config.api, config.data, tokenizer, mp_manager, config.load.base_seed, num_workers=config.load.num_workers
+            )
+        elif config.data.type == DataGenType.WekaTraceReplay:
+            datagen = WekaTraceReplayDataGenerator(
+                config.api, config.data, tokenizer, mp_manager, config.load.base_seed, num_workers=config.load.num_workers
+            )
+        elif config.data.type == DataGenType.SyntheticAgentic:
+            datagen = SyntheticAgenticDataGenerator(
                 config.api, config.data, tokenizer, mp_manager, config.load.base_seed, num_workers=config.load.num_workers
             )
         else:
@@ -354,13 +442,23 @@ def main_cli() -> None:
 
     # Create session metrics collector only for session-replay workflows
     session_metrics_collector = None
-    if config.data and config.data.type in (DataGenType.OTelTraceReplay,):
+    if config.data and config.data.type in (
+        DataGenType.OTelTraceReplay,
+        DataGenType.WekaTraceReplay,
+        DataGenType.SyntheticAgentic,
+    ):
         session_metrics_collector = SessionMetricsCollector()
 
     # Define LoadGenerator with session metrics collector
     if isinstance(metrics_client, PrometheusMetricsClient) and config.report.prometheus and config.report.prometheus.per_stage:
         config.load.interval = max(config.load.interval, metrics_client.scrape_interval)
-    loadgen = LoadGenerator(datagen, config.load, session_metrics_collector)
+    loadgen = LoadGenerator(
+        datagen,
+        config.load,
+        session_metrics_collector,
+        stage_observer=metrics_hub,
+        metrics_registry=metrics_hub.registry,
+    )
 
     # Wire session metrics collector into reportgen if it exists
     if session_metrics_collector:
@@ -369,20 +467,35 @@ def main_cli() -> None:
     # Setup Perf Test Runner
     perfrunner = InferencePerfRunner(model_server_client, loadgen, reportgen, storage_clients)
 
+    metrics_server: Optional[PrometheusMetricsServer] = None
+    metrics_config = config.observability.metrics
+    if metrics_config is not None:
+        # Every interface, since a scraper reaches a pod or a docker -p container by its
+        # IP. Setting the block is the opt-in, so a run that never asked exposes nothing.
+        metrics_server = PrometheusMetricsServer(metrics_hub.registry, port=metrics_config.port, addr="0.0.0.0")
+        try:
+            metrics_server.start()
+            logger.info("Runtime metrics served at http://0.0.0.0:%d/metrics", metrics_server.bound_port)
+        except OSError as e:
+            log_metrics_endpoint_failure(metrics_config, e)
+            metrics_server = None
+
     start_time = time.time()
+    metrics_hub.on_run_start(
+        RunContext(config=config, in_flight_requests=loadgen.in_flight_requests, stage_count=loadgen.stage_count)
+    )
 
     # Run Perf Test
     try:
         perfrunner.run()
     except KeyboardInterrupt:
         pass
+    finally:
+        if metrics_server is not None:
+            metrics_server.stop()
 
     end_time = time.time()
     duration = end_time - start_time  # Calculate the duration of the test
-
-    # Enrich session metrics before generating reports
-    if session_metrics_collector:
-        session_metrics_collector.enrich_metrics(reportgen.metrics_collector.get_metrics())
 
     # Generate Reports after the tests
     reports = perfrunner.generate_reports(
@@ -397,6 +510,29 @@ def main_cli() -> None:
 
     # Save Reports
     perfrunner.save_reports(reports=reports)
+
+    # Print report contents to stdout with markers
+    for report in reports:
+        if report.name == "summary_lifecycle_metrics":
+            print("=== START_SUMMARY ===")
+            print(json.dumps(report.contents, indent=2))
+            print("=== END_SUMMARY ===")
+        elif report.name.startswith("stage_") and report.name.endswith("_lifecycle_metrics"):
+            try:
+                stage_id = report.name.split("_")[1]
+                print(f"=== START_STAGE_{stage_id} ===")
+                print(json.dumps(report.contents, indent=2))
+                print(f"=== END_STAGE_{stage_id} ===")
+            except Exception:
+                pass
+        elif report.name.startswith("inference-perf.partial.stage_"):
+            try:
+                stage_id = report.name.removeprefix("inference-perf.partial.stage_")
+                print(f"=== START_PARTIAL_BR_V0_2_STAGE_{stage_id} ===")
+                print(yaml.safe_dump(report.contents, sort_keys=False, default_flow_style=False))
+                print(f"=== END_PARTIAL_BR_V0_2_STAGE_{stage_id} ===")
+            except Exception:
+                pass
 
     # Print summary table to CLI
     print_summary_table(reports)

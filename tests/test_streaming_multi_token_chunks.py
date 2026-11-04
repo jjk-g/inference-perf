@@ -33,7 +33,7 @@ from aiohttp import ClientResponse
 
 from inference_perf.apis.base import (
     RequestLifecycleMetric,
-    StreamedInferenceResponseInfo,
+    StreamedResponseMetrics,
 )
 from inference_perf.apis.chat import ChatCompletionAPIData, ChatMessage
 from inference_perf.config import APIConfig, APIType
@@ -85,29 +85,31 @@ async def test_multi_token_chunks_count_tokens_not_chunks() -> None:
     response = FakeStreamingResponse([sse])
 
     tokenizer = MagicMock()
-    tokenizer.count_tokens = MagicMock(side_effect=lambda text: len(text.split()))
+    tokenizer.count_tokens = MagicMock(side_effect=lambda text, **kwargs: len(text.split()))
 
     config = APIConfig(type=APIType.Chat, streaming=True)
     data = ChatCompletionAPIData(messages=[ChatMessage(role="user", content="prompt")], max_tokens=100)
 
     info = await data.process_response(cast(ClientResponse, response), config, tokenizer)
 
-    assert isinstance(info.response_info, StreamedInferenceResponseInfo)
-    assert info.response_info.server_usage == {"completion_tokens": 8}
-    assert len(info.response_info.response_chunks) == len(chunk_texts)
+    assert isinstance(info.response_metrics, StreamedResponseMetrics)
+    assert info.response_metrics.server_usage == {"completion_tokens": 8}
+    assert len(info.response_metrics.response_chunks) == len(chunk_texts)
 
     metric = RequestLifecycleMetric(
         scheduled_time=0.0, start_time=0.0, end_time=10.0, request_data="prompt", info=info, error=None
     )
-    summarize_requests([metric], [50], tokenizer=tokenizer)
+    result = summarize_requests([metric], [50], tokenizer=tokenizer)
 
-    assert isinstance(metric.info.response_info, StreamedInferenceResponseInfo)
-    # Sum of per-chunk tokens, NOT chunk count. This is the assertion that
-    # would fail under the pre-#410 implementation.
-    assert metric.info.response_info.output_tokens == 8
-    assert metric.info.response_info.output_tokens != len(chunk_texts)
-    # Per-token timestamps expanded so TPOT/ITL distributions are accurate.
-    assert len(metric.info.response_info.output_token_times) == 8
+    assert result is not None
+    assert isinstance(metric.info.response_metrics, StreamedResponseMetrics)
+    # The authoritative output token total comes from the server (completion_tokens),
+    # surfaced as output_tokens.total. It reflects real tokens, NOT the chunk count
+    # (the #364 bug).
+    assert result.successes["output_tokens"]["total"] == 8
+    assert result.successes["output_tokens"]["total"] != len(chunk_texts)
+    # Per-token timestamps still expand per chunk so TPOT/ITL distributions are accurate.
+    assert len(metric.info.response_metrics.output_token_times) == 8
 
 
 @pytest.mark.asyncio
@@ -128,7 +130,7 @@ async def test_multi_token_chunks_match_server_usage() -> None:
     response = FakeStreamingResponse([sse])
 
     tokenizer = MagicMock()
-    tokenizer.count_tokens = MagicMock(side_effect=lambda text: len(text.split()))
+    tokenizer.count_tokens = MagicMock(side_effect=lambda text, **kwargs: len(text.split()))
 
     config = APIConfig(type=APIType.Chat, streaming=True)
     data = ChatCompletionAPIData(messages=[ChatMessage(role="user", content="prompt")], max_tokens=expected_total)
@@ -139,11 +141,10 @@ async def test_multi_token_chunks_match_server_usage() -> None:
     )
     result = summarize_requests([metric], [50], tokenizer=tokenizer)
 
-    assert isinstance(metric.info.response_info, StreamedInferenceResponseInfo)
-    assert metric.info.response_info.output_tokens == expected_total
-    assert metric.info.response_info.server_usage == {"completion_tokens": expected_total}
-
-    # No mismatches between client tokenization and server usage when the
-    # tokenizer matches; this is the normal-operation expectation.
     assert result is not None
-    assert result.successes["token_count_mismatches"] == 0
+    assert isinstance(metric.info.response_metrics, StreamedResponseMetrics)
+    assert metric.info.response_metrics.server_usage == {"completion_tokens": expected_total}
+
+    # The authoritative output token total comes from the server's completion_tokens,
+    # which is what eliminates the gap against `vllm bench`.
+    assert result.successes["output_tokens"]["total"] == expected_total

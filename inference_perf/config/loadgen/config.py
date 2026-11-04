@@ -1,0 +1,335 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import logging
+import time
+from enum import Enum
+from typing import List, Optional, Union
+
+from inference_perf.config.common import StrictBaseModel
+from pydantic import ConfigDict, Field, model_validator
+
+from inference_perf.config.datagen.replay import TraceConfig
+from inference_perf.utils.cpu_count import default_cpu_count
+
+logger = logging.getLogger(__name__)
+
+
+class LoadType(Enum):
+    CONSTANT = "constant"
+    POISSON = "poisson"
+    TRACE_REPLAY = "trace_replay"
+    CONCURRENT = "concurrent"
+    TRACE_SESSION_REPLAY = "trace_session_replay"
+
+
+class LoadStage(StrictBaseModel):
+    """Base class for load stages. Use specific subclasses for different load types."""
+
+    pass
+
+
+class StandardLoadStage(LoadStage):
+    """Load stage for CONSTANT and POISSON load types."""
+
+    rate: float = Field(..., gt=0, description="Request rate (QPS)")
+    duration: int = Field(..., gt=0, description="Duration in seconds")
+
+    # These fields should not be set for standard load types
+    num_requests: Optional[int] = Field(default=None, description="Not used for standard load types")
+    concurrency_level: Optional[int] = Field(default=None, description="Not used for standard load types")
+
+    @model_validator(mode="after")
+    def validate_standard_fields(self) -> "StandardLoadStage":
+        if self.num_requests is not None:
+            raise ValueError("num_requests should not be set for CONSTANT/POISSON load types")
+        if self.concurrency_level is not None:
+            raise ValueError("concurrency_level should not be set for CONSTANT/POISSON load types")
+        return self
+
+
+class ConcurrentLoadStage(LoadStage):
+    """Load stage for CONCURRENT load type."""
+
+    num_requests: int = Field(..., gt=0, description="Number of requests to send")
+    concurrency_level: int = Field(..., gt=0, description="Concurrency level")
+
+    # These fields are set at runtime for load generation but should not be configured
+    rate: Optional[float] = Field(None, description="Set at runtime for load generation")
+    duration: Optional[int] = Field(None, description="Set at runtime for load generation")
+
+    @model_validator(mode="after")
+    def validate_concurrent_fields(self) -> "ConcurrentLoadStage":
+        # Allow rate and duration to be set at runtime, but they should start as None
+        # No validation needed here since they're set dynamically
+        return self
+
+
+class TraceSessionReplayLoadStage(LoadStage):
+    """Load stage for TRACE_SESSION_REPLAY load type.
+
+    A stage runs exactly ``num_sessions`` sessions (a slice of the corpus) at
+    ``concurrent_sessions`` concurrency.  A session cursor on ``LoadGenerator``
+    advances across stages so each stage draws the next N sessions — mirroring
+    how ``get_data()`` advances through data across Standard/Concurrent stages.
+
+    Modes:
+    1. Simple concurrency control: set concurrent_sessions (and optionally num_sessions)
+    2. Rate-based with concurrency: set concurrent_sessions + session_rate (+ num_sessions)
+    """
+
+    # Session concurrency control (REQUIRED)
+    concurrent_sessions: int = Field(
+        ...,  # Required field
+        ge=0,
+        description=(
+            "Maximum number of sessions active simultaneously. "
+            "0 = all sessions active at once (stress test mode). "
+            "N > 0 = at most N sessions active; when one completes, next is activated."
+        ),
+    )
+
+    # Optional rate limiting
+    session_rate: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Sessions to start per second (optional, omit for no rate limit)",
+    )
+    num_sessions: Optional[int] = Field(
+        None,
+        gt=0,
+        description=(
+            "Number of sessions to run in this stage. "
+            "Draws the next N sessions from the corpus. "
+            "None = all remaining sessions."
+        ),
+    )
+
+    timeout: Optional[float] = Field(
+        None,
+        gt=0,
+        deprecated="Deprecated, use max_stage_duration instead",
+        description=(
+            "Wall-clock cap in seconds on how long the stage may run. Omit to run until "
+            "all sessions in the stage complete. If exceeded, in-flight sessions are "
+            "cancelled, any sessions that had not yet started are dropped, and the stage "
+            "exits as FAILED. Sessions left incomplete this way are counted in the stage's "
+            "session report as sessions_not_completed_active and "
+            "sessions_not_completed_pending."
+        ),
+    )
+
+    max_stage_duration: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Wall-clock cap in seconds on how long the stage may run. Omit to run until "
+            "all sessions in the stage complete. If exceeded, in-flight sessions are "
+            "cancelled, any sessions that had not yet started are dropped, and the stage "
+            "exits as FAILED. Sessions left incomplete this way are counted in the stage's "
+            "session report as sessions_not_completed_active and "
+            "sessions_not_completed_pending."
+        ),
+    )
+    duration: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Planned run length in seconds. When reached, the stage stops dispatching and "
+            "reports COMPLETED rather than FAILED. Sessions still running are cut short and "
+            "recorded as truncated: they are kept out of the session success/failure counts "
+            "and duration percentiles, while the requests they did complete still count. "
+            "In-flight requests finish within load.stage_teardown_grace_seconds and keep "
+            "their metrics. Must be shorter than timeout when both are set. "
+            "Whether the stage can fill its whole window depends on the data generator: "
+            "otel_trace_replay and synthetic_agentic replay the corpus once it is used up, "
+            "while weka_trace_replay builds every session up front and so ends when its "
+            "corpus does - grow that corpus (duplicate_sessions_target) to cover the "
+            "window. Either way a stage that falls short logs a warning saying by how "
+            "much. Optional."
+        ),
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_trace_session_fields(self) -> "TraceSessionReplayLoadStage":
+        # Validate session_rate vs concurrent_sessions
+        if self.session_rate is not None and self.concurrent_sessions > 0:
+            if self.session_rate > self.concurrent_sessions:
+                raise ValueError(
+                    f"session_rate ({self.session_rate}) cannot exceed "
+                    f"concurrent_sessions ({self.concurrent_sessions}). "
+                    f"You can't start sessions faster than the concurrency limit allows."
+                )
+
+        if self.timeout is not None:
+            logger.warning("load.stages[].timeout is deprecated; use max_stage_duration instead.")
+
+        # Both fields stop the stage, so together they race, and a count-based win is the
+        # exact outcome duration was added to rule out: the stage would report COMPLETED
+        # for a time window it stopped short of running. Kept exclusive rather than
+        # letting one act as the other's safety net, which is what max_stage_duration is for.
+        if self.duration is not None and self.num_sessions is not None:
+            raise ValueError(
+                "duration and num_sessions cannot both be set: they are two stop conditions, "
+                "and whichever stop condition is reached first ends the stage. Running out of "
+                "sessions before the deadline would report COMPLETED for a time window that "
+                "was never run, which is what duration exists to prevent. Use duration to "
+                "bound a stage by time, or num_sessions to bound it by session count; for a "
+                "wall-clock safety net on a count-bounded stage, use max_stage_duration."
+            )
+
+        # duration is the planned stop and reports COMPLETED; max_stage_duration is the
+        # failure safety net and reports FAILED. If the net fires first, every
+        # duration-bounded run fails and duration silently does nothing, so require a real
+        # gap rather than only documenting one. timeout is the deprecated spelling of the
+        # same cap, so compare against whichever one is in effect.
+        effective_cap_field = "max_stage_duration" if self.max_stage_duration is not None else "timeout"
+        effective_cap = self.max_stage_duration if self.max_stage_duration is not None else self.timeout
+        if self.duration is not None and effective_cap is not None and self.duration >= effective_cap:
+            raise ValueError(
+                f"duration ({self.duration}) must be shorter than {effective_cap_field} "
+                f"({effective_cap}). duration is the planned stop and reports success; "
+                f"{effective_cap_field} is a safety limit that reports FAILED. With "
+                f"{effective_cap_field} <= duration the stage always fails before reaching "
+                f"its planned stop."
+            )
+
+        return self
+
+
+class StageGenType(Enum):
+    GEOM = "geometric"
+    LINEAR = "linear"
+
+
+class SweepConfig(StrictBaseModel):
+    type: StageGenType = Field(description="How stage rates are spaced up to the saturation rate: 'geometric' or 'linear'.")
+    num_requests: int = Field(
+        default=2000, description="Number of requests sent in the initial burst used to find the saturation rate."
+    )
+    timeout: float = Field(default=60, description="Time limit in seconds for the saturation probe stage.")
+    num_stages: int = Field(default=5, description="Number of load stages to generate.")
+    stage_duration: int = Field(default=180, description="Duration of each generated stage in seconds.")
+    saturation_percentile: float = Field(
+        default=95, description="Percentile of observed request rates taken as the saturation point."
+    )
+
+
+class MultiLoRAConfig(StrictBaseModel):
+    name: str = Field(description="Name of the LoRA adapter to send requests to.")
+    split: float = Field(description="Fraction of traffic sent to this adapter. All splits must sum to 1.0.")
+
+
+class LoadConfig(StrictBaseModel):
+    type: LoadType = Field(default=LoadType.CONSTANT, description="Load pattern used to schedule requests.")
+    interval: float = Field(default=1.0, description="Seconds to wait between stages.")
+    stages: Union[List[StandardLoadStage], List[ConcurrentLoadStage], List[TraceSessionReplayLoadStage]] = Field(
+        default=[], description="Load stages to run in sequence. The stage fields depend on the load type."
+    )
+    sweep: Optional[SweepConfig] = Field(
+        default=None,
+        description="Generate stages automatically up to the server's saturation rate."
+        " Not valid for the 'concurrent' and 'trace_session_replay' load types.",
+    )
+    num_workers: int = Field(
+        default_factory=default_cpu_count,
+        description="Number of worker processes sending requests. Defaults to the cgroup-aware CPU count.",
+    )
+    worker_max_concurrency: int = Field(default=100, description="Maximum concurrent in-flight requests per worker.")
+    worker_max_tcp_connections: int = Field(default=2500, description="Maximum TCP connections per worker.")
+    trace: Optional[TraceConfig] = Field(
+        default=None, description="Request timing trace to replay. Only used by the 'trace_replay' load type."
+    )
+    circuit_breakers: List[str] = Field(default=[], description="Names of configured circuit breakers to enable for the run.")
+    request_timeout: Optional[float] = Field(default=None, description="Per-request timeout in seconds.")
+    request_retries: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many extra attempts to make when a request fails before response headers "
+            "were obtained -- a connection refused, reset, or dropped from the pool. "
+            "Faults raised once a response was established are never retried, since "
+            "re-sending could mix or discard token-level measurements; neither are timeouts "
+            "or TLS configuration errors, which fail identically on every attempt. A failed "
+            "attempt can still have reached the server, so a retry is cheap for the client "
+            "but not free for the endpoint. Defaults to 0, preserving the historical "
+            "behavior of failing on the first fault. request_timeout applies per attempt, "
+            "so worst-case wall time per request becomes "
+            "(1 + request_retries) * request_timeout plus backoff."
+        ),
+    )
+    request_retry_backoff_sec: float = Field(
+        default=0.5,
+        ge=0,
+        description=(
+            "Base delay before the first retry, in seconds. Each further retry doubles it and "
+            "adds jitter, so attempts do not resynchronize into bursts against a server that "
+            "is already dropping connections. Ignored when request_retries is 0."
+        ),
+    )
+    stage_teardown_grace_seconds: float = Field(
+        default=120.0,
+        ge=0,
+        description=(
+            "How long to let in-flight requests finish after a stage ends or times out, "
+            "before they are cancelled. Teardown is bounded: once the grace (plus a fixed "
+            "margin) expires, remaining work is force-cancelled and unresponsive workers "
+            "are terminated and respawned, so report generation always runs. Set to 0 to "
+            "cancel in-flight requests immediately at stage end. The teardown window is "
+            "excluded from the stage's reported end_time and metrics windows; it is "
+            "reported separately as teardown_duration."
+        ),
+    )
+    lora_traffic_split: Optional[List[MultiLoRAConfig]] = Field(
+        default=None, description="Traffic split across LoRA adapters. Splits must sum to 1.0."
+    )
+    base_seed: int = Field(
+        default_factory=lambda: int(time.time() * 1000),
+        description="Base random seed for load generation. Defaults to the current time.",
+    )
+
+    @model_validator(mode="after")
+    def validate_load_config(self) -> "LoadConfig":
+        # Validate that sweep is not used with concurrent or trace session replay load types
+        if self.type in (LoadType.CONCURRENT, LoadType.TRACE_SESSION_REPLAY) and self.sweep is not None:
+            raise ValueError(f"Cannot have sweep config with {self.type.value.upper()} load type")
+
+        # Validate stage types match load type
+        if self.type == LoadType.CONCURRENT:
+            for i, stage in enumerate(self.stages):
+                if not isinstance(stage, ConcurrentLoadStage):
+                    raise ValueError(
+                        f"Stage {i}: CONCURRENT load type requires ConcurrentLoadStage, got {type(stage).__name__}"
+                    )
+        elif self.type == LoadType.TRACE_SESSION_REPLAY:
+            for i, stage in enumerate(self.stages):
+                if not isinstance(stage, TraceSessionReplayLoadStage):
+                    raise ValueError(
+                        f"Stage {i}: TRACE_SESSION_REPLAY load type requires TraceSessionReplayLoadStage, got {type(stage).__name__}"
+                    )
+        else:  # CONSTANT, POISSON, or TRACE_REPLAY
+            for i, stage in enumerate(self.stages):
+                if not isinstance(stage, StandardLoadStage):
+                    raise ValueError(
+                        f"Stage {i}: {self.type.value.upper()} load type requires StandardLoadStage, got {type(stage).__name__}"
+                    )
+
+        # Validate multilora traffic split adds up to 1.0 if present
+        if self.lora_traffic_split is not None:
+            total = sum(config.split for config in self.lora_traffic_split)
+            if total != 1.0:
+                raise ValueError("MultiLoRA traffic split in load config does not add up to 1.0")
+
+        return self

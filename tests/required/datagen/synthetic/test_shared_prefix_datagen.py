@@ -1,0 +1,697 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import pytest
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+from inference_perf.apis import LazyLoadInferenceAPIData
+from inference_perf.apis.user_session import LocalUserSession, UserSessionCompletionAPIData
+from inference_perf.config import (
+    APIConfig,
+    APIType,
+    DataConfig,
+    DataGenType,
+    Distribution,
+    DistributionType,
+    SharedPrefix,
+    CustomTokenizerConfig,
+)
+from inference_perf.datagen.synthetic.shared_prefix_datagen import SharedPrefixDataGenerator
+from inference_perf.utils.custom_tokenizer import CustomTokenizer
+
+# --- Tests from HEAD (Mock based) ---
+
+
+def _make_mock_tokenizer(vocab_size: int = 1000) -> MagicMock:
+    """Create a mock tokenizer that returns predictable text."""
+    mock_tokenizer = MagicMock()
+    hf_tok = MagicMock()
+    hf_tok.vocab_size = vocab_size
+    hf_tok.decode = MagicMock(side_effect=lambda ids, **kw: f"text_{len(ids)}")
+    hf_tok.batch_decode = MagicMock(side_effect=lambda batch, **kw: [f"text_{len(ids)}" for ids in batch])
+    mock_tokenizer.get_tokenizer.return_value = hf_tok
+
+    def count_tokens(text: str) -> int:
+        parts = text.split()
+        total = 0
+        for p in parts:
+            if p.startswith("text_"):
+                total += int(p[5:])
+            else:
+                total += 1
+        return total
+
+    mock_tokenizer.count_tokens.side_effect = count_tokens
+    return mock_tokenizer
+
+
+def _make_generator(shared_prefix: SharedPrefix) -> SharedPrefixDataGenerator:
+    api_config = APIConfig(type=APIType.Completion)
+    data_config = DataConfig(type=DataGenType.SharedPrefix, shared_prefix=shared_prefix)
+    return SharedPrefixDataGenerator(api_config, data_config, _make_mock_tokenizer())
+
+
+class TestDeterministicSeeding:
+    def test_same_seed_produces_identical_output(self) -> None:
+        sp = SharedPrefix(num_groups=3, num_prompts_per_group=5, question_len=50, output_len=50, seed=42)
+        gen1 = _make_generator(sp)
+        gen2 = _make_generator(SharedPrefix(num_groups=3, num_prompts_per_group=5, question_len=50, output_len=50, seed=42))
+        assert gen1.prompts == gen2.prompts
+        assert gen1.flat_output_lens == gen2.flat_output_lens
+
+    def test_different_seeds_produce_different_output(self) -> None:
+        # Use distributions so lengths vary and differences are observable
+        dist = Distribution(type=DistributionType.NORMAL, mean=100.0, min=10, max=500, std_dev=50.0)
+        gen1 = _make_generator(SharedPrefix(num_groups=3, num_prompts_per_group=5, question_len=dist, output_len=50, seed=42))
+        gen2 = _make_generator(SharedPrefix(num_groups=3, num_prompts_per_group=5, question_len=dist, output_len=50, seed=99))
+        assert gen1.question_len_list_per_group != gen2.question_len_list_per_group
+
+    def test_no_seed_is_nondeterministic(self) -> None:
+        # Use distributions so lengths vary between unseeded generators
+        dist = Distribution(type=DistributionType.NORMAL, mean=100.0, min=10, max=500, std_dev=50.0)
+        gen1 = _make_generator(SharedPrefix(num_groups=3, num_prompts_per_group=10, question_len=dist, output_len=50))
+        gen2 = _make_generator(SharedPrefix(num_groups=3, num_prompts_per_group=10, question_len=dist, output_len=50))
+        assert gen1.question_len_list_per_group != gen2.question_len_list_per_group
+
+
+class TestFixedLengths:
+    def test_all_output_lens_equal_when_fixed(self) -> None:
+        gen = _make_generator(SharedPrefix(num_groups=2, num_prompts_per_group=5, output_len=42, seed=1))
+        assert all(v == 42 for v in gen.flat_output_lens)
+
+    def test_prompt_count_matches_groups_times_prompts(self) -> None:
+        gen = _make_generator(SharedPrefix(num_groups=4, num_prompts_per_group=7, seed=1))
+        assert len(gen.prompts) == 4 * 7
+        assert len(gen.flat_output_lens) == 4 * 7
+
+
+class TestDistributionLengths:
+    def test_question_len_distribution_within_bounds(self) -> None:
+        sp = SharedPrefix(
+            num_groups=2,
+            num_prompts_per_group=50,
+            question_len=Distribution(type=DistributionType.NORMAL, mean=200.0, min=50, max=500, std_dev=50.0),
+            output_len=50,
+            seed=42,
+        )
+        gen = _make_generator(sp)
+        # Check the per-group question lengths are within bounds
+        for group_lens in gen.question_len_list_per_group:
+            assert all(50 <= v <= 500 for v in group_lens)
+
+    def test_output_len_distribution_within_bounds(self) -> None:
+        sp = SharedPrefix(
+            num_groups=2,
+            num_prompts_per_group=50,
+            question_len=50,
+            output_len=Distribution(type=DistributionType.LOGNORMAL, mean=150.0, min=1, max=4096, std_dev=60.0),
+            seed=42,
+        )
+        gen = _make_generator(sp)
+        assert all(1 <= v <= 4096 for v in gen.flat_output_lens)
+
+    def test_system_prompt_len_distribution_varies_per_group(self) -> None:
+        sp = SharedPrefix(
+            num_groups=5,
+            num_prompts_per_group=3,
+            system_prompt_len=Distribution(type=DistributionType.UNIFORM, mean=100.0, min=50, max=200),
+            seed=42,
+        )
+        gen = _make_generator(sp)
+        # With uniform distribution over [50, 200], 5 groups should have varying lengths
+        assert len(set(gen.system_prompt_lens_per_group)) > 1
+
+
+class TestLegacyCompatibility:
+    def test_legacy_question_distribution_still_works(self) -> None:
+        sp = SharedPrefix(
+            num_groups=2,
+            num_prompts_per_group=50,
+            question_len=50,
+            question_distribution=Distribution(min=30, max=200, mean=100, std_dev=30),
+            output_len=50,
+            seed=42,
+        )
+        gen = _make_generator(sp)
+        # Should have variation from the legacy distribution
+        for group_lens in gen.question_len_list_per_group:
+            assert all(30 <= v <= 200 for v in group_lens)
+
+    def test_legacy_output_distribution_still_works(self) -> None:
+        sp = SharedPrefix(
+            num_groups=2,
+            num_prompts_per_group=50,
+            question_len=50,
+            output_len=50,
+            output_distribution=Distribution(min=10, max=500, mean=100, std_dev=50),
+            seed=42,
+        )
+        gen = _make_generator(sp)
+        assert all(10 <= v <= 500 for v in gen.flat_output_lens)
+
+
+class TestMultiTurnChat:
+    def test_user_sessions_created(self) -> None:
+        sp = SharedPrefix(num_groups=2, num_prompts_per_group=5, enable_multi_turn_chat=True, seed=42)
+        gen = _make_generator(sp)
+        assert len(gen.user_sessions) == 10
+        assert len(gen.prompts) == 10
+
+    def test_get_data_yields_lazy_data(self) -> None:
+        sp = SharedPrefix(num_groups=2, num_prompts_per_group=3, seed=42)
+        gen = _make_generator(sp)
+        data_iter = gen.get_data()
+        items = [next(data_iter) for _ in range(10)]
+        assert len(items) == 10
+        assert all(hasattr(item, "data_index") for item in items)
+
+
+# --- Tests from d168373 (Tokenizer based) ---
+
+
+@pytest.fixture
+def api_config() -> APIConfig:
+    # `api_type`/`model_name`/`tokenizer_name` are not APIConfig fields and were silently
+    # dropped before the models rejected extras; the tokenizer comes from its own fixture.
+    return APIConfig(type=APIType.Completion)
+
+
+@pytest.fixture
+def shared_prefix_config() -> SharedPrefix:
+    return SharedPrefix(
+        num_groups=2,
+        num_prompts_per_group=3,
+        system_prompt_len=10,
+        question_len=5,
+        output_len=15,
+    )
+
+
+@pytest.fixture
+def data_config(shared_prefix_config: SharedPrefix) -> DataConfig:
+    return DataConfig(shared_prefix=shared_prefix_config)
+
+
+@pytest.fixture
+def tokenizer() -> CustomTokenizer:
+    tokenizer_config = CustomTokenizerConfig(pretrained_model_name_or_path="gpt2")
+    return CustomTokenizer(tokenizer_config)
+
+
+def test_shared_prefix_datagen_token_counts(
+    api_config: APIConfig, data_config: DataConfig, tokenizer: CustomTokenizer, shared_prefix_config: SharedPrefix
+) -> None:
+    generator = SharedPrefixDataGenerator(api_config, data_config, tokenizer)
+
+    # The generator shuffles prompts, so we test all of them
+    for prompt in generator.prompts:
+        # It's tricky to perfectly split the prompt back into system and question
+        # because of how tokenization and decoding works (e.g., spaces).
+        # Instead, we'll check the total token count.
+
+        # The expected total length is system_prompt_len + question_len.
+        # There's also a space added between them, which is usually 1 token.
+        assert isinstance(shared_prefix_config.system_prompt_len, int)
+        assert isinstance(shared_prefix_config.question_len, int)
+        expected_min_len = shared_prefix_config.system_prompt_len + shared_prefix_config.question_len
+
+        token_ids = tokenizer.get_tokenizer().encode(prompt)
+
+        # The actual token count might be slightly different due to the space
+        # and how tokens are combined. We'll check if it's very close.
+        assert len(token_ids) == expected_min_len, (
+            f"Prompt: '{prompt}', Tokens: {len(token_ids)}, Expected: {expected_min_len}"
+        )
+
+
+# --- Tests from shared-prefix-fix (Dummy Tokenizer based) ---
+
+
+class DummyTokenizer:
+    vocab_size = 1000
+    all_special_ids = [1, 2, 3]
+
+    def encode(self, text: str) -> list[int]:
+        parts = text.split()
+        try:
+            return [int(part) for part in parts]
+        except ValueError:
+            # Keep arbitrary response text proportional to its whitespace-token
+            # count so the long-context regression exercises truncation.
+            return list(range(len(parts)))
+
+    def decode(self, tokens: list[int], **kwargs: Any) -> str:
+        return " ".join(str(t) for t in tokens)
+
+    def batch_decode(self, sequences: list[list[int]], **kwargs: Any) -> list[str]:
+        return [self.decode(seq) for seq in sequences]
+
+
+class DummyCustomTokenizer(CustomTokenizer):
+    def __init__(self) -> None:
+        pass
+
+    def get_tokenizer(self) -> Any:
+        return DummyTokenizer()
+
+    def count_tokens(self, text: str, add_special_tokens: bool = True) -> int:
+        return len(text.split())
+
+
+class BoundaryHFTokenizer:
+    vocab_size = 3
+    all_special_ids = [0]
+
+    def decode(self, tokens: list[int], **kwargs: Any) -> str:
+        if tokens == [1]:
+            return "PREFIX"
+        if tokens == [2]:
+            return "QUESTION"
+        if tokens == [1, 2]:
+            return "PREFIX::QUESTION"
+        return "TOKEN"
+
+    def batch_decode(self, sequences: list[list[int]], **kwargs: Any) -> list[str]:
+        return [self.decode(sequence) for sequence in sequences]
+
+    def encode(self, text: str, **kwargs: Any) -> list[int]:
+        return list(range(len(text.split())))
+
+
+class BoundaryCustomTokenizer(CustomTokenizer):
+    def __init__(self) -> None:
+        pass
+
+    def get_tokenizer(self) -> Any:
+        return BoundaryHFTokenizer()
+
+    def count_tokens(self, text: str, add_special_tokens: bool = True) -> int:
+        return len(text.split())
+
+
+class WhitespaceBoundaryHFTokenizer:
+    """Tokenizer-shaped fixture whose suffix includes meaningful whitespace."""
+
+    vocab_size = 5
+    all_special_ids = [0]
+
+    def decode(self, tokens: list[int], **kwargs: Any) -> str:
+        decoded = {
+            (): "",
+            (1,): "PREFIX",
+            (2,): "\n",
+            (3,): "  ",
+            (4,): "QUESTION",
+            (1, 2): "PREFIX\n",
+            (1, 3, 4): "PREFIX  QUESTION",
+            (3, 4): "  QUESTION",
+        }
+        return decoded.get(tuple(tokens), "TOKEN")
+
+    def batch_decode(self, sequences: list[list[int]], **kwargs: Any) -> list[str]:
+        return [self.decode(sequence, **kwargs) for sequence in sequences]
+
+    def encode(self, text: str, **kwargs: Any) -> list[int]:
+        encoded = {
+            "": [],
+            "PREFIX": [1],
+            "\n": [2],
+            "  ": [3],
+            "QUESTION": [4],
+            "  QUESTION": [3, 4],
+            "PREFIX\n": [1, 2],
+            "PREFIX  QUESTION": [1, 3, 4],
+        }
+        return encoded.get(text, list(range(len(text.split()))))
+
+
+class WhitespaceBoundaryCustomTokenizer(CustomTokenizer):
+    def __init__(self) -> None:
+        pass
+
+    def get_tokenizer(self) -> Any:
+        return WhitespaceBoundaryHFTokenizer()
+
+    def count_tokens(self, text: str, add_special_tokens: bool = True) -> int:
+        return len(text.split())
+
+
+class WhitespaceBoundarySharedPrefixDataGenerator(SharedPrefixDataGenerator):
+    def __init__(self, api_config: APIConfig, data_config: DataConfig, suffix_ids: list[int]) -> None:
+        self._boundary_suffix_ids = suffix_ids
+        super().__init__(api_config, data_config, WhitespaceBoundaryCustomTokenizer())
+
+    def _generate_exact_length_text(self, target_len: int) -> tuple[str, list[int]]:
+        return ("PREFIX", [1]) if target_len else ("", [])
+
+    def _sample_suffix_ids(self, length: int) -> list[int]:
+        return list(self._boundary_suffix_ids) if length else []
+
+
+class BoundarySharedPrefixDataGenerator(SharedPrefixDataGenerator):
+    def _generate_exact_length_text(self, target_len: int) -> tuple[str, list[int]]:
+        return ("PREFIX", [1]) if target_len else ("", [])
+
+    def _sample_suffix_ids(self, length: int) -> list[int]:
+        return [2] if length else []
+
+
+def _make_boundary_generator() -> BoundarySharedPrefixDataGenerator:
+    api_config = APIConfig(type=APIType.Completion)
+    data_config = DataConfig(
+        type=DataGenType.SharedPrefix,
+        shared_prefix=SharedPrefix(
+            num_groups=1,
+            num_prompts_per_group=1,
+            system_prompt_len=1,
+            question_len=1,
+            output_len=1,
+            enable_multi_turn_chat=True,
+        ),
+    )
+    return BoundarySharedPrefixDataGenerator(api_config, data_config, BoundaryCustomTokenizer())
+
+
+def test_shared_prefix_datagen_excludes_special_tokens() -> None:
+    api_config = APIConfig(type=APIType.Completion, streaming=True)
+    data_config = DataConfig(
+        type=DataGenType.SharedPrefix,
+        shared_prefix=SharedPrefix(
+            num_groups=2,
+            num_prompts_per_group=3,
+            system_prompt_len=10,
+            question_len=20,
+            output_len=15,
+            enable_multi_turn_chat=False,
+        ),
+    )
+    tokenizer = DummyCustomTokenizer()
+
+    generator = SharedPrefixDataGenerator(api_config, data_config, tokenizer)
+
+    # Verify token IDs generated do not contain special tokens
+    tokens = generator._generate_random_token_ids(100)
+    for token in tokens:
+        assert token not in [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_multiturn_uses_generated_question_boundary() -> None:
+    """Question extraction must not assume a one-character prefix separator."""
+    LocalUserSession.clear_instances()
+    try:
+        generator = _make_boundary_generator()
+        data = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=0, preferred_worker_id=0))
+        assert isinstance(data, UserSessionCompletionAPIData)
+        assert generator.prompts == ["PREFIX::QUESTION"]
+        assert generator.question_texts == ["::QUESTION"]
+        assert data.prompt == "::QUESTION"
+
+        body = await data.to_request_body("model", 1, False, False)
+        assert body["prompt"] == generator.prompts[0]
+    finally:
+        LocalUserSession.clear_instances()
+
+
+@pytest.mark.parametrize(
+    ("suffix_ids", "suffix_text"),
+    [([2], "\n"), ([3, 4], "  QUESTION")],
+    ids=["newline-token", "multiple-spaces"],
+)
+@pytest.mark.asyncio
+async def test_multiturn_preserves_whitespace_suffix_tokens(suffix_ids: list[int], suffix_text: str) -> None:
+    """A decoded whitespace token is question content, not a disposable separator."""
+    LocalUserSession.clear_instances()
+    try:
+        data_config = DataConfig(
+            type=DataGenType.SharedPrefix,
+            shared_prefix=SharedPrefix(
+                num_groups=1,
+                num_prompts_per_group=1,
+                system_prompt_len=1,
+                question_len=len(suffix_ids),
+                output_len=1,
+                enable_multi_turn_chat=True,
+            ),
+        )
+        generator = WhitespaceBoundarySharedPrefixDataGenerator(APIConfig(type=APIType.Completion), data_config, suffix_ids)
+        data = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=0, preferred_worker_id=0))
+
+        assert isinstance(data, UserSessionCompletionAPIData)
+        assert generator.question_texts == [suffix_text]
+        assert data.prompt == suffix_text
+        tokenizer = generator.tokenizer
+        assert tokenizer is not None
+        hf_tokenizer = tokenizer.get_tokenizer()
+        assert hf_tokenizer.encode(data.prompt) == suffix_ids
+
+        body = await data.to_request_body("model", 1, False, False)
+        assert body["prompt"] == generator.prompts[0]
+        assert hf_tokenizer.encode(body["prompt"]) == [1, *suffix_ids]
+
+        response_text = " RESPONSE"
+        prior_prompt_and_response = body["prompt"] + response_text
+        data.user_session.update_context(prior_prompt_and_response)
+
+        next_data = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=1, preferred_worker_id=0))
+        assert isinstance(next_data, UserSessionCompletionAPIData)
+        next_body = await next_data.to_request_body("model", 1, False, False)
+        assert next_body["prompt"].startswith(prior_prompt_and_response)
+        assert next_body["prompt"] == prior_prompt_and_response + suffix_text
+
+        next_response = " NEXT RESPONSE"
+        next_data.user_session.update_context(next_body["prompt"] + next_response)
+        third_data = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=2, preferred_worker_id=0))
+        assert isinstance(third_data, UserSessionCompletionAPIData)
+        third_body = await third_data.to_request_body("model", 1, False, False)
+        assert third_body["prompt"] == next_body["prompt"] + next_response + suffix_text
+    finally:
+        LocalUserSession.clear_instances()
+
+
+@pytest.mark.asyncio
+async def test_multiturn_reuses_registered_session_without_repeating_prefix() -> None:
+    """Shared-prefix turns must use the session initialized by the datagen."""
+    LocalUserSession.clear_instances()
+    try:
+        api_config = APIConfig(type=APIType.Completion)
+        data_config = DataConfig(
+            type=DataGenType.SharedPrefix,
+            shared_prefix=SharedPrefix(
+                num_groups=1,
+                num_prompts_per_group=1,
+                system_prompt_len=5,
+                question_len=5,
+                output_len=5,
+                enable_multi_turn_chat=True,
+                seed=42,
+            ),
+        )
+        generator = SharedPrefixDataGenerator(api_config, data_config, DummyCustomTokenizer())
+        initialized_session = generator.user_sessions[0]
+
+        first = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=0, preferred_worker_id=0))
+        assert isinstance(first, UserSessionCompletionAPIData)
+        assert first.user_session is initialized_session
+
+        full_prompt_tokens = generator.prompts[0].split()
+        prefix_tokens = initialized_session.context.split()
+        question_tokens = full_prompt_tokens[len(prefix_tokens) :]
+
+        first_body = await first.to_request_body("model", 64, False, False)
+        assert first_body["prompt"].split() == full_prompt_tokens
+
+        first.user_session.update_context(first.prompt + " RESPONSE")
+
+        second = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=1, preferred_worker_id=0))
+        assert isinstance(second, UserSessionCompletionAPIData)
+        second_body = await second.to_request_body("model", 64, False, False)
+        assert second_body["prompt"].split() == full_prompt_tokens + ["RESPONSE"] + question_tokens
+    finally:
+        LocalUserSession.clear_instances()
+
+
+@pytest.mark.asyncio
+async def test_multiturn_rebuilds_session_after_stage_clear() -> None:
+    """A new stage must restore the configured prefix without old turn history."""
+    LocalUserSession.clear_instances()
+    try:
+        generator = _make_boundary_generator()
+        first = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=0, preferred_worker_id=0))
+        assert isinstance(first, UserSessionCompletionAPIData)
+        first_session = first.user_session
+        assert first_session is generator.user_sessions[0]
+
+        first_body = await first.to_request_body("model", 64, False, False)
+        assert first_body["prompt"] == "PREFIX::QUESTION"
+        first_session.update_context("OLD HISTORY")
+
+        LocalUserSession.clear_instances()
+        second = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=1, preferred_worker_id=0))
+        assert isinstance(second, UserSessionCompletionAPIData)
+        second_session = second.user_session
+        assert second_session is generator.user_sessions[0]
+        assert second_session is not first_session
+        assert second_session.context == "PREFIX"
+        assert second_session.system_prompt == "PREFIX"
+        assert second_session.tokenizer is generator.tokenizer
+        assert second_session.max_model_len == generator.max_model_len
+
+        second_body = await second.to_request_body("model", 64, False, False)
+        assert second_body["prompt"] == "PREFIX::QUESTION"
+    finally:
+        LocalUserSession.clear_instances()
+
+
+@pytest.mark.asyncio
+async def test_multiturn_generators_keep_materialized_sessions_isolated() -> None:
+    """Separate generators must not share the process-global session registry entry."""
+    LocalUserSession.clear_instances()
+    try:
+        generator_a = _make_boundary_generator()
+        generator_b = _make_boundary_generator()
+        first_a = generator_a.load_lazy_data(LazyLoadInferenceAPIData(data_index=0, preferred_worker_id=0))
+        first_b = generator_b.load_lazy_data(LazyLoadInferenceAPIData(data_index=0, preferred_worker_id=0))
+        assert isinstance(first_a, UserSessionCompletionAPIData)
+        assert isinstance(first_b, UserSessionCompletionAPIData)
+        assert first_a.user_session_id != first_b.user_session_id
+        assert first_a.user_session is generator_a.user_sessions[0]
+        assert first_b.user_session is generator_b.user_sessions[0]
+        assert first_a.user_session is not first_b.user_session
+
+        await first_a.to_request_body("model", 64, False, False)
+        prior_prompt_and_response = first_a.prompt + " GENERATOR A HISTORY"
+        first_a.user_session.update_context(prior_prompt_and_response)
+
+        second_a = generator_a.load_lazy_data(LazyLoadInferenceAPIData(data_index=1, preferred_worker_id=0))
+        second_b = generator_b.load_lazy_data(LazyLoadInferenceAPIData(data_index=1, preferred_worker_id=0))
+        assert isinstance(second_a, UserSessionCompletionAPIData)
+        assert isinstance(second_b, UserSessionCompletionAPIData)
+
+        body_a = await second_a.to_request_body("model", 64, False, False)
+        body_b = await second_b.to_request_body("model", 64, False, False)
+        assert body_a["prompt"].startswith(prior_prompt_and_response)
+        assert body_a["prompt"] == prior_prompt_and_response + " ::QUESTION"
+        assert body_b["prompt"] == "PREFIX::QUESTION"
+    finally:
+        LocalUserSession.clear_instances()
+
+
+def test_multiturn_output_len_leaving_no_prompt_budget_is_rejected() -> None:
+    """Reject a context ceiling that cannot fit output and the safety buffer."""
+    with pytest.raises(ValueError, match="leaves no room for a prompt"):
+        _make_generator(
+            SharedPrefix(
+                num_groups=1,
+                num_prompts_per_group=1,
+                output_len=100,
+                max_model_len=300,
+                enable_multi_turn_chat=True,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_multiturn_process_response_truncates_context_and_keeps_prefix_once() -> None:
+    """The real response path must bound history while retaining one shared prefix."""
+    LocalUserSession.clear_instances()
+    try:
+        api_config = APIConfig(type=APIType.Completion)
+        data_config = DataConfig(
+            type=DataGenType.SharedPrefix,
+            shared_prefix=SharedPrefix(
+                num_groups=1,
+                num_prompts_per_group=1,
+                system_prompt_len=5,
+                question_len=5,
+                output_len=5,
+                max_model_len=225,
+                enable_multi_turn_chat=True,
+                seed=42,
+            ),
+        )
+        generator = SharedPrefixDataGenerator(api_config, data_config, DummyCustomTokenizer())
+        assert generator.max_model_len == 225
+        tokenizer = generator.tokenizer
+        assert tokenizer is not None
+        session = generator.user_sessions[0]
+        prefix = session.system_prompt
+        prompt_lengths: list[int] = []
+
+        for data_index in range(40):
+            data = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=data_index, preferred_worker_id=0))
+            assert isinstance(data, UserSessionCompletionAPIData)
+            body = await data.to_request_body("model", 5, False, False)
+            prompt = body["prompt"]
+            prompt_lengths.append(tokenizer.count_tokens(prompt))
+
+            # max_model_len - max_tokens - PROMPT_TOKEN_BUFFER == 20 for this fixture.
+            assert prompt_lengths[-1] <= 20
+            assert prompt.count(prefix) == 1
+
+            response = MagicMock()
+            response.json = AsyncMock(return_value={"choices": [{"text": "RESPONSE"}]})
+            await data.process_response(response, api_config, tokenizer)
+            assert tokenizer.count_tokens(session.context) <= generator.max_model_len
+
+        assert max(prompt_lengths) <= 20
+        assert len(session.history) < 40
+    finally:
+        LocalUserSession.clear_instances()
+
+
+@pytest.mark.asyncio
+async def test_multiturn_zero_prefix_accumulates_process_response() -> None:
+    """An empty shared prefix still represents a history-bearing session."""
+    LocalUserSession.clear_instances()
+    try:
+        api_config = APIConfig(type=APIType.Completion)
+        data_config = DataConfig(
+            type=DataGenType.SharedPrefix,
+            shared_prefix=SharedPrefix(
+                num_groups=1,
+                num_prompts_per_group=1,
+                system_prompt_len=0,
+                question_len=2,
+                output_len=1,
+                max_model_len=225,
+                enable_multi_turn_chat=True,
+                seed=42,
+            ),
+        )
+        generator = SharedPrefixDataGenerator(api_config, data_config, DummyCustomTokenizer())
+        tokenizer = generator.tokenizer
+        assert tokenizer is not None
+        session = generator.user_sessions[0]
+        assert session.system_prompt == ""
+        assert session._accumulates_history
+
+        first = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=0, preferred_worker_id=0))
+        assert isinstance(first, UserSessionCompletionAPIData)
+        first_body = await first.to_request_body("model", 1, False, False)
+        assert first_body["prompt"] == generator.prompts[0]
+
+        response = MagicMock()
+        response.json = AsyncMock(return_value={"choices": [{"text": " RESPONSE"}]})
+        await first.process_response(response, api_config, tokenizer)
+        assert session.history == [f"{first.prompt} RESPONSE"]
+
+        second = generator.load_lazy_data(LazyLoadInferenceAPIData(data_index=1, preferred_worker_id=0))
+        assert isinstance(second, UserSessionCompletionAPIData)
+        second_body = await second.to_request_body("model", 1, False, False)
+        assert "RESPONSE" in second_body["prompt"]
+        assert second_body["prompt"].endswith(generator.question_texts[0])
+    finally:
+        LocalUserSession.clear_instances()

@@ -17,10 +17,17 @@ import sys
 import shutil
 import os
 from pathlib import Path
+from typing import Any
 import argparse
 
-# Ensure PDM doesn't reuse the current virtualenv when we are trying to use another one (e.g. for baseline)
-os.environ["PDM_IGNORE_ACTIVE_VENV"] = "1"
+# Absolute repo-wide coverage floor. Set just below the current total so the
+# build fails if coverage regresses meaningfully in absolute terms, independent
+# of the delta-vs-main ratchet. Raise this as coverage improves.
+MIN_TOTAL_COVERAGE = 77.0
+
+# Coverage config (pyproject.toml) used for both the current and baseline runs,
+# anchored to the repo root so importing this module does not depend on cwd.
+COVERAGE_CONFIG = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 
 def get_coverage_data(report_path):
@@ -53,6 +60,7 @@ def generate_baseline(output_path: Path):
         shutil.rmtree(temp_dir)
 
     print("--- Generating baseline coverage from 'main' ---")
+    output_path.unlink(missing_ok=True)
     try:
         # 1. Create a temporary worktree of the main branch
         try:
@@ -77,10 +85,17 @@ def generate_baseline(output_path: Path):
         # Use the current project's pyproject.toml for coverage config to ensure consistent settings (e.g. omit rules)
         # We need to map the project_root to the absolute path
         config_path = project_root / "pyproject.toml"
-        run_command(
-            f"pdm run pytest --cov=inference_perf --cov-config={config_path.absolute()} --cov-report=json:{output_path.absolute()} tests/",
-            cwd=temp_dir,
-        )
+        try:
+            run_command(
+                f"pdm run pytest --cov=inference_perf --cov-config={config_path.absolute()} --cov-report=json:{output_path.absolute()} tests/",
+                cwd=temp_dir,
+            )
+        except subprocess.CalledProcessError:
+            # A red main must not block the PR that fixes it: pytest-cov writes the
+            # report even when tests fail, and that coverage is still a valid baseline.
+            if not output_path.exists():
+                raise
+            print("⚠️ Tests failed on 'main'; using its coverage report as the baseline anyway.")
 
         print(f"✅ Baseline generated: {output_path.name}")
     finally:
@@ -93,11 +108,31 @@ def generate_baseline(output_path: Path):
 
 
 def generate_current(output_path: Path):
-    """Generates coverage for the current branch/environment."""
+    """Generates coverage for the current branch/environment.
+
+    Also emits coverage.xml (Cobertura) as a CI artifact and coverage.lcov,
+    which CI uploads to Coveralls to render the README badge. Uses the same
+    --cov-config as the baseline run so multiprocessing-aware settings apply
+    consistently and the two reports are comparable.
+    """
     print("--- Generating current coverage ---")
-    cmd = f"pdm run pytest --cov=inference_perf --cov-report=json:{output_path.absolute()} tests/"
+    cmd = (
+        f"pdm run pytest --cov=inference_perf --cov-config={COVERAGE_CONFIG} "
+        f"--cov-report=json:{output_path.absolute()} --cov-report=xml:coverage.xml "
+        f"--cov-report=lcov:coverage.lcov tests/"
+    )
     run_command(cmd)
-    print(f"✅ Current report generated: {output_path.name}")
+    print(f"✅ Current report generated: {output_path.name} (+ coverage.xml, coverage.lcov)")
+
+
+def coverage_regressed(current_totals: dict[str, Any], baseline_totals: dict[str, Any]) -> bool:
+    """True when the total fell vs main and uncovered statements rose.
+
+    Deleting covered code only does the first. The total is compared with a
+    0.01 epsilon for float precision.
+    """
+    fell = current_totals["percent_covered"] < baseline_totals["percent_covered"] - 0.01
+    return fell and current_totals["missing_lines"] > baseline_totals["missing_lines"]
 
 
 def print_detailed_report(current_data, baseline_data):
@@ -138,6 +173,13 @@ def main():
 
     args = parser.parse_args()
 
+    # Ensure PDM doesn't reuse the current virtualenv when we are trying to use another one (e.g. for baseline)
+    os.environ["PDM_IGNORE_ACTIVE_VENV"] = "1"
+    # Exporting COVERAGE_PROCESS_START lets coverage start measuring inside the
+    # multiprocessing Workers (see [tool.coverage.run] concurrency=multiprocessing),
+    # so subprocess code reports real numbers instead of reading as uncovered.
+    os.environ["COVERAGE_PROCESS_START"] = str(COVERAGE_CONFIG)
+
     current_report = Path("coverage.json")
     baseline_report = Path("coverage_main.json")
 
@@ -177,21 +219,48 @@ def main():
 
     current_val = current_data["totals"]["percent_covered"]
     baseline_val = baseline_data["totals"]["percent_covered"]
+    current_missing = current_data["totals"]["missing_lines"]
+    baseline_missing = baseline_data["totals"]["missing_lines"]
 
     if args.detailed:
         print_detailed_report(current_data, baseline_data)
 
     print("\n--- Coverage Summary ---")
-    print(f"Main Branch:    {baseline_val:.2f}%")
-    print(f"Current Branch: {current_val:.2f}%")
+    print(f"Absolute coverage: {current_val:.2f}% (floor: {MIN_TOTAL_COVERAGE:.2f}%)")
+    print(f"Main Branch:       {baseline_val:.2f}% ({baseline_missing} uncovered)")
+    print(f"Current Branch:    {current_val:.2f}% ({current_missing} uncovered)")
 
-    # Use a small epsilon (0.01) to handle floating point precision issues
-    if current_val < (baseline_val - 0.01):
+    failures = []
+
+    # Check 1: absolute repo-wide floor.
+    if current_val < (MIN_TOTAL_COVERAGE - 0.01):
+        failures.append(f"Absolute coverage {current_val:.2f}% is below the floor of {MIN_TOTAL_COVERAGE:.2f}%")
+    else:
+        print(f"✅ Absolute: {current_val:.2f}% meets the {MIN_TOTAL_COVERAGE:.2f}% floor.")
+
+    # Check 2: delta-vs-main ratchet. Fails only when the total fell AND uncovered
+    # statements rose, so deleting covered code passes.
+    if coverage_regressed(current_data["totals"], baseline_data["totals"]):
         diff = baseline_val - current_val
-        print(f"❌ FAIL: Total coverage decreased by {diff:.2f}%")
+        failures.append(
+            f"Total coverage decreased by {diff:.2f}% vs main ({baseline_val:.2f}%) "
+            f"and uncovered statements rose from {baseline_missing} to {current_missing}"
+        )
+    elif current_val >= baseline_val - 0.01:
+        print(f"✅ Delta: total coverage held or improved vs main ({baseline_val:.2f}%).")
+    else:
+        print(
+            f"✅ Delta: total coverage fell vs main ({baseline_val:.2f}%), "
+            f"but uncovered statements did not rise ({baseline_missing} -> {current_missing})."
+        )
+
+    if failures:
+        print("\n❌ FAIL:")
+        for f in failures:
+            print(f"  - {f}")
         sys.exit(1)
 
-    print("✅ PASS: Coverage is maintained or improved.")
+    print("\n✅ PASS: absolute floor and delta-vs-main both satisfied.")
 
 
 if __name__ == "__main__":

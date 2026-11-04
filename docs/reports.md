@@ -9,7 +9,13 @@ By default, reports are saved in a directory named `reports-YYYYMMDD-HHMMSS/`. T
 - **`summary_lifecycle_metrics.json`**: Aggregated metrics for the entire benchmark run.
 - **`stage_N_lifecycle_metrics.json`**: Metrics for a specific load stage (where N is the stage index).
 - **`per_request_lifecycle_metrics.json`**: Raw data for every single request, including timestamps and token counts.
-- **`config.yaml`**: A copy of the configuration used for the run.
+- **`config.yaml`**: A copy of the configuration used for the run, with credentials redacted (see [Credentials](config.md#credentials)).
+
+For Weka replay runs with `separate_subagent_session_ids` enabled, each per-request
+entry keeps `session_id` as the enclosing replay session used for aggregation and
+adds `request_session_id` for the wire identity sent through
+`api.session_id_header_key`. Parent requests omit `request_session_id` because their
+wire identity is already the enclosing `session_id`.
 
 ## Understanding the Report Structure
 
@@ -29,11 +35,57 @@ Here is an example snippet from a `summary_lifecycle_metrics.json` report:
         "mean": 0.80,
         "median": 0.20,
         "p90": 2.26
+      },
+      "time_to_first_output_token": {
+        "mean": 0.80,
+        "median": 0.20,
+        "p90": 2.26
       }
     },
     "throughput": {
       "requests_per_sec": 1.02,
       "total_tokens_per_sec": 676.12
+    }
+  },
+  "failures": {
+    "count": 3,
+    "request_latency": {
+      "mean": 9.948665728999458,
+      "min": 0.5831485409980814,
+      "p90": 11.684405915999378
+    },
+    "prompt_tokens": {
+      "total": 0.0,
+      "cached": 0.0,
+      "uncached": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "p90": 0.0,
+    },
+    "by_label": {
+      "504 - Gateway Timeout": {
+        "count": 2,
+        "messages": [
+          {
+            "message": "...504 Gateway Time-out...",
+            "session_ids": [
+              "trace1715_066de3655406_a9687407",
+              "trace2210_1f9b0c4d7e21_b3c58120"
+            ]
+          }
+        ]
+      },
+      "400 - Invalid JSON": {
+        "count": 1,
+        "messages": [
+          {
+            "message": "...Invalid JSON: EOF while parsing a string at line 202 column 31...",
+            "session_ids": [
+              "trace42_9f000393d262_f395c930"
+            ]
+          }
+        ]
+      }
     }
   }
 }
@@ -45,5 +97,70 @@ Here is an example snippet from a `summary_lifecycle_metrics.json` report:
 
 - **`load_summary`**: Details about the requested vs achieved load.
 - **`successes`**: Metrics for successful requests.
-- **`failures`**: Metrics for failed requests.
+- **`failures`**: Metrics for failed requests, including the per-label error breakdown.
 - **`goodput_metrics`**: (Optional) Goodput statistics if constraints were configured.
+
+### Token Counts
+
+`successes` carries both a client-side and a server-side token count, and they are not
+interchangeable: `output_len` is the client's re-tokenization of the response text,
+`output_tokens` is the server's own count, `prompt_tokens` is the server's count of the prompt
+with client tokenization as the fallback, and `token_count_mismatches` counts the requests
+where the two output counts disagree. Alongside it, `client_fallback_requests` says how many
+requests had no server number at all, per side. See
+[Token Accounting and Provenance](./metrics.md#token-accounting-and-provenance) for what each
+field is derived from and which one normalizes per-token latency.
+
+## Session Reports
+
+Session replay runs (for example OTel trace replay) additionally produce session
+lifecycle reports, where a session is a graph of dependent requests. Alongside
+`num_sessions_succeeded` and `num_sessions_failed`, the summary carries a
+`failures` section with the same shape as the request-level one:
+
+```json
+{
+  "num_sessions": 100,
+  "num_sessions_succeeded": 94,
+  "num_sessions_failed": 6,
+  "failures": {
+    "count": 6,
+    "by_label": {
+      "predecessor_failed": {
+        "count": 4,
+        "messages": [
+          {
+            "message": "predecessor failed",
+            "session_ids": ["trace1715_066de3655406", "trace2210_1f9b0c4d7e21"]
+          }
+        ]
+      },
+      "recorded_fallback_malformed": {
+        "count": 2,
+        "messages": [
+          {
+            "message": "recorded fallback for evt_7 is also malformed",
+            "session_ids": ["trace42_9f000393d262"]
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Unlike request failures, which are bucketed by parsing server error text, session
+failures are bucketed on a stable cause code emitted by the replay runtime. The
+prose in `messages` may embed per-event ids, so the code is what keeps a cause
+from splitting into one bucket per failure.
+
+| Cause code | Meaning |
+| --- | --- |
+| `predecessor_failed` | An event this one awaited failed, so the request was skipped. |
+| `predecessor_wait_failed` | Waiting on a predecessor event timed out. |
+| `session_already_failed` | The session was already failed when this event was reached. |
+| `recorded_fallback_malformed` | `bad_tool_call_handling=use_recorded` fired, but the recorded fallback message was also malformed. |
+| `substitution_tool_call_expected` | The recorded trace expected a tool call at this slot but the live model returned plain text. |
+| `request_failed` | The request to the model server raised; `message` carries the exception type and text. |
+| `unknown` | The session failed without a more specific cause being recorded. |
+| `unreported` | The session was counted as failed but carried no error at all. Should not occur; treat as a bug. |

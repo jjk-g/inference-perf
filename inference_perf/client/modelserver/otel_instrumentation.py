@@ -1,4 +1,4 @@
-# Copyright 2025 The Kubernetes Authors.
+# Copyright 2026 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,6 +29,9 @@ import logging
 import os
 from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING, cast
 from contextlib import contextmanager
+
+from inference_perf.apis.image_parts import split_data_url, summarize_base64
+
 
 if TYPE_CHECKING:
     # Local stub for type checking - avoids "Any" issues with --ignore-missing-imports
@@ -326,6 +329,11 @@ class OTelInstrumentation:
                     span.set_attribute("gen_ai.response.time_per_output_token", response_info["time_per_output_token"])
                 if "total_latency" in response_info:
                     span.set_attribute("gen_ai.response.total_latency", response_info["total_latency"])
+                # Present only on a retried request. total_latency above matches this span's
+                # own wall duration -- the span wraps every attempt -- and this is the share
+                # of it lost to attempts that failed, rather than a competing definition.
+                if "retry_wasted_sec" in response_info:
+                    span.set_attribute("gen_ai.response.retry_wasted_sec", response_info["retry_wasted_sec"])
 
                 # Finish reason
                 if "finish_reason" in response_info:
@@ -339,9 +347,17 @@ class OTelInstrumentation:
                     # Text completion - gen_ai.prompt as string
                     span.set_attribute("gen_ai.prompt", response_info["input_prompt"])
 
-                # Output text (gen_ai.output.text)
+                # Tool definitions sent with the request (gen_ai.tool.definitions)
+                if "tool_definitions" in response_info:
+                    span.set_attribute("gen_ai.tool.definitions", response_info["tool_definitions"])
+
+                # Output text (gen_ai.output.text) — plain text only
                 if "output_text" in response_info:
                     span.set_attribute("gen_ai.output.text", response_info["output_text"])
+
+                # Full output message when tool calls are present (gen_ai.output.message)
+                if "output_message" in response_info:
+                    span.set_attribute("gen_ai.output.message", response_info["output_message"])
 
                 # Response ID (custom attribute)
                 if "response_id" in response_info:
@@ -519,3 +535,25 @@ def get_otel_instrumentation(service_name: Optional[str] = None, enabled: Option
         _global_instrumentation = OTelInstrumentation(service_name=service_name, enabled=enabled)
 
     return _global_instrumentation
+
+
+def summarize_media(value: Any) -> Any:
+    """Copy of request messages with each inline media payload replaced by a short summary.
+
+    Span attributes would otherwise carry every image, video and audio clip in full. A
+    base64 data URL keeps its ``data:<mime>;base64,`` prefix, followed by
+    ``[<bytes> bytes, sha256:<16 hex>]``; ``input_audio.data`` becomes the summary alone.
+    """
+    if isinstance(value, str):
+        data_url = split_data_url(value)
+        return f"data:{data_url[0]};base64,{summarize_base64(data_url[1])}" if data_url else value
+    if isinstance(value, list):
+        return [summarize_media(item) for item in value]
+    if isinstance(value, dict):
+        if value.get("type") == "input_audio" and isinstance(value.get("input_audio"), dict):
+            audio = dict(value["input_audio"])
+            if isinstance(audio.get("data"), str):
+                audio["data"] = summarize_base64(audio["data"])
+            return {**value, "input_audio": audio}
+        return {key: summarize_media(item) for key, item in value.items()}
+    return value

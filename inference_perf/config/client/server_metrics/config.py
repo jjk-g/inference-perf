@@ -1,0 +1,50 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from typing import Dict, List, Optional
+
+from inference_perf.config.common import StrictBaseModel
+from pydantic import Field, HttpUrl, SecretStr, model_validator
+
+
+class PrometheusClientConfig(StrictBaseModel):
+    scrape_interval: int = Field(default=15, description="Scrape interval of the Prometheus server in seconds.")
+    url: Optional[HttpUrl] = Field(default=None, description="URL of the Prometheus server to query.")
+    filters: List[str] = Field(
+        default=[], description="PromQL label matchers (e.g. 'namespace=\"default\"') applied to every metric query."
+    )
+    google_managed: bool = Field(
+        default=False, description="Query Google Cloud Managed Service for Prometheus instead of a self-hosted server."
+    )
+    bearer_token: Optional[SecretStr] = Field(
+        default=None,
+        description="Bearer token sent as an Authorization header with every Prometheus query. "
+        "Redacted in the logged and saved config.",
+    )
+    verify_ssl: bool = Field(
+        default=True, description="Verify the Prometheus server's TLS certificate. Disable for self-signed certificates."
+    )
+    headers: Optional[Dict[str, str]] = Field(
+        default=None, description="Additional HTTP headers to send with every Prometheus query."
+    )
+
+    @model_validator(mode="after")
+    def check_exclusive_fields(self) -> "PrometheusClientConfig":
+        if bool(self.url) == bool(self.google_managed):
+            raise ValueError("Exactly one of 'url' or 'google_managed' must be set.")
+        if self.google_managed and self.bearer_token is not None and self.bearer_token.get_secret_value():
+            raise ValueError(
+                "'bearer_token' cannot be combined with 'google_managed': the Google-managed client "
+                "authenticates with ADC credentials and ignores 'bearer_token'."
+            )
+        return self

@@ -50,9 +50,9 @@ async def test_prometheus_metrics_collection(prometheus_server):
     model_name = TEST_MODEL_NAME
     model_path = extract_tarball(TEST_MODEL_TARBALL)
 
-    prometheus_url = prometheus_server
+    prometheus_url = prometheus_server.url
 
-    async with LLMDInferenceSimRunner(model_name, port=18000) as sim:
+    async with LLMDInferenceSimRunner(model_name, port=prometheus_server.sim_port) as sim:
         # Run a short benchmark
         result = await run_benchmark_minimal(
             {
@@ -109,7 +109,7 @@ async def test_prometheus_metrics_collection(prometheus_server):
 
         # Debug and verify metrics exposed by simulator
         try:
-            resp = requests.get("http://127.0.0.1:18000/metrics", timeout=1)
+            resp = requests.get(f"http://127.0.0.1:{sim.port}/metrics", timeout=1)
             metrics_content = resp.text
             logger.debug(f"Simulator Metrics Content: {format_content(metrics_content)}")
 
@@ -146,11 +146,16 @@ async def test_prometheus_metrics_collection(prometheus_server):
     assert "request_success_count" in successes_obj, "Missing 'request_success_count'"
     success_count = successes_obj["request_success_count"]
     logger.debug(f"Asserting request_success_count ({success_count}) is greater than 100")
+    assert success_count is not None, (
+        "request_success_count is missing from the report even though the simulator "
+        "recorded successes; the Prometheus queries returned no series"
+    )
     assert success_count > 100.0, f"Expected > 100 successes in report, got {success_count}"
 
     assert "rate" in successes_obj, "Missing 'rate' (requests_per_second)"
     rps = successes_obj["rate"]
     logger.debug(f"Asserting rate/requests_per_second ({rps}) is reasonable")
+    assert rps is not None, "rate is missing from the report; the Prometheus queries returned no series"
     assert 3.0 < rps < 7.0, f"Expected rate around 5, got {rps}"
 
     lifecycle_report = result.reports.get("summary_lifecycle_metrics.json")
@@ -168,9 +173,9 @@ async def test_prometheus_metrics_collection_chat(prometheus_server):
     model_name = TEST_MODEL_NAME
     model_path = extract_tarball(TEST_MODEL_TARBALL)
 
-    prometheus_url = prometheus_server
+    prometheus_url = prometheus_server.url
 
-    async with LLMDInferenceSimRunner(model_name, port=18001) as sim:
+    async with LLMDInferenceSimRunner(model_name, port=prometheus_server.sim_port) as sim:
         # Run a short benchmark with chat API
         result = await run_benchmark_minimal(
             {
@@ -220,7 +225,7 @@ async def test_prometheus_metrics_collection_chat(prometheus_server):
 
         # Debug and verify metrics exposed by simulator
         try:
-            resp = requests.get("http://127.0.0.1:18001/metrics", timeout=1)
+            resp = requests.get(f"http://127.0.0.1:{sim.port}/metrics", timeout=1)
             metrics_content = resp.text
             logger.debug(f"Simulator Metrics Content: {format_content(metrics_content)}")
 
@@ -255,11 +260,16 @@ async def test_prometheus_metrics_collection_chat(prometheus_server):
     assert "request_success_count" in successes_obj, "Missing 'request_success_count'"
     success_count = successes_obj["request_success_count"]
     logger.debug(f"Asserting request_success_count ({success_count}) is greater than 100")
+    assert success_count is not None, (
+        "request_success_count is missing from the report even though the simulator "
+        "recorded successes; the Prometheus queries returned no series"
+    )
     assert success_count > 100.0, f"Expected > 100 successes in report, got {success_count}"
 
     assert "rate" in successes_obj, "Missing 'rate' (requests_per_second)"
     rps = successes_obj["rate"]
     logger.debug(f"Asserting rate/requests_per_second ({rps}) is reasonable")
+    assert rps is not None, "rate is missing from the report; the Prometheus queries returned no series"
     assert 3.0 < rps < 7.0, f"Expected rate around 5, got {rps}"
 
 

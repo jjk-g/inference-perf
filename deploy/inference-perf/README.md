@@ -18,15 +18,15 @@ Make sure you have the following tools installed and configured:
 Before deployment, navigate to the **`deploy/inference-perf`** directory and edit the **`values.yaml`** file to customize your deployment and the benchmark parameters.
 
 #### Optional Token Parameters
-Hugging Face token can be provided either by providing a value (`hfToken`) or by referencing an existing Kubernetes Secret (`hfSecret.Name` and `hfSecret.Key`).
+Hugging Face token can be provided either by providing a value (`token.hfToken`) or by referencing an existing Kubernetes Secret (`token.hfSecret.name` and `token.hfSecret.key`).
 
-> If both `hfToken` and the `hfSecret` parameters are provided, the chart logic is configured to prioritize the `hfSecret` reference.
+> If both `token.hfToken` and the `token.hfSecret` parameters are provided, the chart logic is configured to prioritize the `token.hfSecret` reference.
 
 | Key | Description | Default |
 | :--- | :--- | :--- |
-| `hfToken` | Hugging Face API token. If provided, a Kubernetes `Secret` named `hf-token-secret` will be created for authentication. | `""` |
-| `hfSecret.name` | The name of a pre-existing Kubernetes Secret that contains a Hugging Face API token. | `""` |
-| `hfSecret.key` | The key within the pre-existing Kubernetes Secret that holds the token value. | `""` |
+| `token.hfToken` | Hugging Face API token. If provided, a Kubernetes `Secret` whose name ends in `-hf-secret` will be created for authentication. | `""` |
+| `token.hfSecret.name` | The name of a pre-existing Kubernetes Secret that contains a Hugging Face API token. | `""` |
+| `token.hfSecret.key` | The key within the pre-existing Kubernetes Secret that holds the token value. | `""` |
 ---
 
 #### Optional Job Parameters
@@ -89,6 +89,28 @@ The identity executing the workload (e.g., the associated Kubernetes Service Acc
 
 ---
 
+#### Runtime Metrics Parameters
+
+inference-perf serves its own runtime metrics (stage state, request counts, latencies) on `/metrics` while the run is active. See [`docs/runtime_metrics.md`](../../docs/runtime_metrics.md) for the metric set. The endpoint runs when the benchmark config sets `config.observability.metrics`, which the default values do with `port: 9464`. Set it to `null` (`--set config.observability.metrics=null`) to turn the endpoint off. The chart reads the same block, so the container port and scrape configs always match what the process serves. Port `0` (ephemeral) cannot be scraped and fails the install, as does a port that is not a number.
+
+The keys below only decide how Prometheus finds the pod. They render nothing while the endpoint is off.
+
+| Key | Description | Default |
+| :--- | :--- | :--- |
+| `metrics.annotations` | Add `prometheus.io/scrape`, `prometheus.io/port` and `prometheus.io/path` pod annotations, for Prometheus setups that discover pods by annotation. Off while a monitor below is enabled, so a cluster that also scrapes by annotation does not collect the pod twice. | `true` |
+| `metrics.interval` | Scrape interval for the `PodMonitor` and `PodMonitoring`. The pod stops serving when the run ends, so keep it short relative to the run. | `15s` |
+| `metrics.podMonitor.enabled` | Create a `PodMonitor` for the Prometheus Operator. Requires the `monitoring.coreos.com` CRDs. | `false` |
+| `metrics.podMonitor.labels` | Extra labels on the `PodMonitor`, e.g. the `release` label your Prometheus selects on. | `{}` |
+| `metrics.podMonitoring.enabled` | Create a `PodMonitoring` for Google Cloud Managed Service for Prometheus on GKE. | `false` |
+| `metrics.podMonitoring.labels` | Extra labels on the `PodMonitoring`. | `{}` |
+---
+
+To check the endpoint by hand while a run is active:
+```bash
+kubectl port-forward $(kubectl get job -l app.kubernetes.io/instance=<release> -o name) 9464:9464
+curl -s localhost:9464/metrics | grep '^inference_perf_'
+```
+
 ### 3. Run Deployment
 
 Use the **`helm install`** command from the **`deploy/inference-perf`** directory to deploy the chart.
@@ -98,9 +120,9 @@ Use the **`helm install`** command from the **`deploy/inference-perf`** director
     helm install test .
     ```
 
-* **Set `hfToken` Override:** Pass the Hugging Face token directly.
+* **Set `token.hfToken` Override:** Pass the Hugging Face token directly.
     ```bash
-    helm install test . --set hfToken="<TOKEN>"
+    helm install test . --set token.hfToken="<TOKEN>"
     ```
 
 * **Custom Config Override:** Make changes to the values file for custom settings.

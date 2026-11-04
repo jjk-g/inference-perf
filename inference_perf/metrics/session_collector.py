@@ -75,8 +75,8 @@ class SessionMetricsCollector:
             if m.session_id:
                 inp, out = token_by_session[m.session_id]
                 token_by_session[m.session_id] = (
-                    inp + m.info.input_tokens,
-                    out + (m.info.response_info.output_tokens if m.info.response_info else 0),
+                    inp + m.info.request_metrics.text.input_tokens,
+                    out + (m.info.response_metrics.output_tokens if m.info.response_metrics else 0),
                 )
                 if m.session_id not in error_by_session and m.error is not None:
                     error_by_session[m.session_id] = m.error
@@ -86,5 +86,11 @@ class SessionMetricsCollector:
             inp, out = token_by_session.get(sm.session_id, (0, 0))
             sm.total_input_tokens = inp
             sm.total_output_tokens = out
-            sm.error = error_by_session.get(sm.session_id)
-            sm.success = (sm.num_events_completed == sm.num_events) and (sm.error is None)
+            request_error = error_by_session.get(sm.session_id)
+            if request_error is not None:
+                sm.error = request_error
+            # Mirrors ReportGenerator._enrich_sessions: a session cut short at the stage
+            # boundary is not a failure, so it is left None rather than False. This copy
+            # has no callers today (report generation uses _enrich_sessions), but the two
+            # must not disagree if it is ever wired up.
+            sm.success = None if sm.truncated else ((sm.num_events_completed == sm.num_events) and (sm.error is None))

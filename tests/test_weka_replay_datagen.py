@@ -1,0 +1,971 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from unittest.mock import MagicMock
+
+import pytest
+
+from inference_perf.config import APIConfig, APIType, DataConfig, DataGenType
+from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+from inference_perf.datagen.base import LazyLoadDataMixin
+from inference_perf.datagen.replay.otel_trace_to_replay_graph import graph_to_dict
+from inference_perf.datagen.replay.replay_graph_session_datagen import SessionChatCompletionAPIData
+from inference_perf.datagen.replay.weka_trace_replay_datagen import (
+    FilterExpressionError,
+    HashIdRandomGenerator,
+    WekaTraceReplayDataGenerator,
+    WekaTrace,
+    RoleSegment,
+    ConversationReconstructor,
+    longest_common_prefix,
+    truncate_synth_buf_at_block,
+    _IdleGapTimeWarp,
+)
+
+
+def test_longest_common_prefix() -> None:
+    assert longest_common_prefix([1, 2, 3], [1, 2, 4]) == 2
+    assert longest_common_prefix([1, 2], [1, 2, 3]) == 2
+    assert longest_common_prefix([1], [2]) == 0
+    assert longest_common_prefix([], [1]) == 0
+
+
+def test_truncate_synth_buf_at_block() -> None:
+    def dummy_decode(tokens: list[int]) -> str:
+        return ",".join(str(t) for t in tokens)
+
+    segments = [
+        RoleSegment(role="system", block_start=0, block_count=2, tokens=[10, 11], content="10,11"),
+        RoleSegment(role="user", block_start=2, block_count=3, tokens=[20, 21, 22], content="20,21,22"),
+    ]
+
+    # Truncate at block 3
+    # block 3 lies inside the second segment (since system has blocks 0,1 and user has 2,3,4)
+    # Target blocks = 3, so we keep 3 blocks total: system (2) + user (1)
+    # The user segment should be truncated to block_count=1, tokens=[20]
+    disturbed = truncate_synth_buf_at_block(segments, target_blocks=3, block_size=1, decode_tokens_to_text=dummy_decode)
+
+    assert disturbed == 1  # Index of disturbed segment
+    assert len(segments) == 2
+    assert segments[0].block_count == 2
+    assert segments[1].block_count == 1
+    assert segments[1].tokens == [20]
+    assert segments[1].content == "20"
+
+
+def test_hash_id_random_generator() -> None:
+    rng1 = HashIdRandomGenerator(base_seed=42)
+    rng1.set_trace_id("trace_xyz")
+    rng1.reseed_for_hash_id(1001)
+    val1_a = rng1.randrange(1000)
+    val1_b = rng1.randrange(1000)
+
+    # Re-instantiate with same seed, trace ID and hash ID
+    rng2 = HashIdRandomGenerator(base_seed=42)
+    rng2.set_trace_id("trace_xyz")
+    rng2.reseed_for_hash_id(1001)
+    val2_a = rng2.randrange(1000)
+    val2_b = rng2.randrange(1000)
+
+    assert val1_a == val2_a
+    assert val1_b == val2_b
+
+    # A different seed, trace ID, or hash ID should produce a different result
+    rng3 = HashIdRandomGenerator(base_seed=43)
+    rng3.set_trace_id("trace_xyz")
+    rng3.reseed_for_hash_id(1001)
+    val3_a = rng3.randrange(1000)
+    assert val3_a != val1_a
+
+
+def test_idle_gap_time_warp() -> None:
+    # Gap cap = 10s
+    warp = _IdleGapTimeWarp(request_starts=[0.0, 5.0, 35.0, 45.0], cap_seconds=10.0)
+
+    # 0.0 maps to 0.0
+    assert warp.map(0.0) == 0.0
+    # 5.0 maps to 5.0 (since 5.0 - 0.0 = 5.0 <= 10.0)
+    assert warp.map(5.0) == 5.0
+
+    # 35.0 has a gap from 5.0 of 30s. Cap is 10s. Excess is 20s.
+    # So 35.0 shifts left by 20s to 15.0
+    assert warp.map(35.0) == 15.0
+
+    # 45.0 has a gap from 35.0 of 10s (equal to cap). So it shifts left by same 20s to 25.0
+    assert warp.map(45.0) == 25.0
+
+
+def test_conversation_reconstructor() -> None:
+    def decode_block_tokens(hash_ids: list[int]) -> list[int]:
+        # Simple dummy block decoder: block content is [hash_id]
+        return [h for h in hash_ids]
+
+    def sample_partial_tail_tokens(n: int, seed: str) -> list[int]:
+        return [99] * n
+
+    def decode_tokens_to_text(tokens: list[int]) -> str:
+        return ",".join(str(t) for t in tokens)
+
+    recon = ConversationReconstructor(
+        block_size=1,
+        decode_block_tokens=decode_block_tokens,
+        sample_partial_tail_tokens=sample_partial_tail_tokens,
+        decode_tokens_to_text=decode_tokens_to_text,
+    )
+
+    # Turn 0: input tokens = 3, hash_ids = [1, 2, 3]
+    recon.init_turn_0(
+        hash_ids=[1, 2, 3],
+        in_tokens=3,
+        tool_tokens=0,
+        system_tokens=0,
+        seed="seed0",
+    )
+
+    msgs = recon.snapshot_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["role"] == "user"
+    assert msgs[0]["content"] == "1,2,3"
+
+    # Turn 1: curr_in_tokens = 5, hash_ids = [1, 2, 10, 11, 12], prev_out_tokens = 2
+    # LCP of [1, 2, 3] and [1, 2, 10, 11, 12] is [1, 2] (length 2)
+    # It will truncate the user segment at block 2, leaving system/user tokens [1, 2]
+    # The previous assistant output size is 2. The remaining block capacity is curr_in_tokens - lcp = 3.
+    # assistant blocks = min(ceil(2/1), 3) = 2. So assistant blocks = [10, 11].
+    # User blocks = remaining = 1. User block = [12].
+    recon.advance_turn(
+        prev_hash_ids=[1, 2, 3],
+        prev_in_tokens=3,
+        prev_out_tokens=2,
+        curr_hash_ids=[1, 2, 10, 11, 12],
+        curr_in_tokens=5,
+        seed="seed1",
+    )
+
+    msgs = recon.snapshot_messages()
+    assert len(msgs) == 3
+    assert msgs[0]["role"] == "user"
+    assert msgs[0]["content"] == "1,2"
+    assert msgs[1]["role"] == "assistant"
+    assert msgs[1]["content"] == "10,11"
+    assert msgs[2]["role"] == "user"
+    assert msgs[2]["content"] == "12"
+
+
+def test_weka_trace_replay_generator_mock(tmp_path: Path) -> None:
+    # Create a mock Weka Trace file
+    trace_data = {
+        "id": "mock_trace_123",
+        "models": ["claude-opus-4-8"],
+        "block_size": 2,
+        "tool_tokens": 0,
+        "system_tokens": 0,
+        "requests": [
+            {
+                "t": 0.1,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 4,
+                "out": 2,
+                "hash_ids": [10, 20],
+                "api_time": 0.5,
+            },
+            {
+                "t": 1.2,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 8,
+                "out": 4,
+                "hash_ids": [10, 20, 30, 40],
+                "api_time": 0.8,
+            },
+        ],
+    }
+
+    trace_file = tmp_path / "mock_trace.json"
+    trace_file.write_text(json.dumps(trace_data))
+
+    # Mock tokenizer
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_tokenizer().encode = lambda x: [9] * len(x)
+    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(str(i) for i in x)
+
+    # API config
+    api_cfg = APIConfig(type=APIType.Chat, streaming=False)
+
+    # Datagen Config
+    data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+    # Setup weka_trace_replay config mock
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+
+    weka_cfg = WekaTraceReplayConfig(
+        trace_files=[str(trace_file)],
+        default_block_size=2,
+    )
+    data_cfg.weka_trace_replay = weka_cfg
+
+    # Initialize generator
+    gen = WekaTraceReplayDataGenerator(
+        api_config=api_cfg,
+        config=data_cfg,
+        tokenizer=mock_tokenizer,
+        num_workers=1,
+    )
+
+    assert len(gen.sessions) == 1
+    session = gen._get_session(0)
+    assert session.source_id == "mock_trace_123"
+
+    # Graph should have 2 events representing the 2 parent turns
+    assert len(session.graph.events) == 2
+    events = sorted(session.graph.events.values(), key=lambda e: e.t_start_ms)
+
+    assert events[0].call.total_input_tokens == 4
+    assert events[0].call.expected_output_tokens == 2
+
+    assert events[1].call.total_input_tokens == 8
+    assert events[1].call.expected_output_tokens == 4
+
+    # Predecessor edge check
+    assert events[1].predecessor_event_ids == [events[0].event_id]
+
+
+def test_weka_trace_replay_generator_mock_no_warp(tmp_path: Path) -> None:
+    # Create a mock Weka Trace file with a huge gap (100 seconds)
+    trace_data = {
+        "id": "mock_trace_no_warp",
+        "models": ["claude-opus-4-8"],
+        "block_size": 2,
+        "tool_tokens": 0,
+        "system_tokens": 0,
+        "requests": [
+            {
+                "t": 0.1,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 4,
+                "out": 2,
+                "hash_ids": [10, 20],
+                "api_time": 0.5,
+            },
+            {
+                "t": 100.1,
+                "type": "n",
+                "model": "claude-opus-4-8",
+                "in": 8,
+                "out": 4,
+                "hash_ids": [10, 20, 30, 40],
+                "api_time": 0.8,
+            },
+        ],
+    }
+
+    trace_file = tmp_path / "mock_trace_no_warp.json"
+    trace_file.write_text(json.dumps(trace_data))
+
+    # Mock tokenizer
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_tokenizer().encode = lambda x: [9] * len(x)
+    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(str(i) for i in x)
+
+    # API config
+    api_cfg = APIConfig(type=APIType.Chat, streaming=False)
+
+    # Datagen Config with trace_idle_gap_cap_seconds = 0 (disabled)
+    data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+
+    weka_cfg = WekaTraceReplayConfig(
+        trace_files=[str(trace_file)],
+        default_block_size=2,
+        trace_idle_gap_cap_seconds=0,
+    )
+    data_cfg.weka_trace_replay = weka_cfg
+
+    # Initialize generator
+    gen = WekaTraceReplayDataGenerator(
+        api_config=api_cfg,
+        config=data_cfg,
+        tokenizer=mock_tokenizer,
+        num_workers=1,
+    )
+
+    assert len(gen.sessions) == 1
+    session = gen._get_session(0)
+    events = sorted(session.graph.events.values(), key=lambda e: e.t_start_ms)
+
+    # In raw seconds: t0 = 0.1s (100ms), t1 = 100.1s (100100ms)
+    # The gap is exactly 100000ms. Since gap warping is disabled (<= 0),
+    # the start times should reflect original timing.
+    assert events[0].t_start_ms == 100
+    assert events[1].t_start_ms == 100100
+    assert events[1].wait_ms == 100100 - events[0].t_end_ms
+
+
+def test_weka_trace_replay_parallel_matches_serial(tmp_path: Path) -> None:
+    """Parallel session building (datagen_workers > 1) must produce output
+    identical to the serial path: same sessions, same order, same graphs."""
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+    from inference_perf.datagen.replay.otel_trace_to_replay_graph import graph_to_dict
+
+    trace_files = []
+    for i in range(4):
+        trace_data = {
+            "id": f"mock_trace_{i}",
+            "models": ["claude-opus-4-8"],
+            "block_size": 2,
+            "tool_tokens": 0,
+            "system_tokens": 0,
+            "requests": [
+                {
+                    "t": 0.1,
+                    "type": "n",
+                    "model": "claude-opus-4-8",
+                    "in": 4,
+                    "out": 2,
+                    "hash_ids": [10 + i, 20 + i],
+                    "api_time": 0.5,
+                },
+                {
+                    "t": 1.2,
+                    "type": "n",
+                    "model": "claude-opus-4-8",
+                    "in": 8,
+                    "out": 4,
+                    "hash_ids": [10 + i, 20 + i, 30 + i, 40 + i],
+                    "api_time": 0.8,
+                },
+            ],
+        }
+        trace_file = tmp_path / f"mock_trace_{i}.json"
+        trace_file.write_text(json.dumps(trace_data))
+        trace_files.append(str(trace_file))
+
+    def build(datagen_workers: int) -> WekaTraceReplayDataGenerator:
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.get_tokenizer().encode = lambda x: [9] * len(x)
+        mock_tokenizer.get_tokenizer().decode = lambda x: "".join(str(i) for i in x)
+
+        data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+        data_cfg.weka_trace_replay = WekaTraceReplayConfig(
+            trace_files=trace_files,
+            default_block_size=2,
+            datagen_workers=datagen_workers,
+        )
+        return WekaTraceReplayDataGenerator(
+            api_config=APIConfig(type=APIType.Chat, streaming=False),
+            config=data_cfg,
+            tokenizer=mock_tokenizer,
+            num_workers=1,
+        )
+
+    serial = build(1)
+    parallel = build(2)
+
+    # The Weka datagen uses the eager path, so no session slot is ever None.
+    serial_sessions = [s for s in serial.sessions if s is not None]
+    parallel_sessions = [s for s in parallel.sessions if s is not None]
+    assert len(serial.sessions) == len(serial_sessions) == 4
+    assert [s.session_id for s in serial_sessions] == [s.session_id for s in parallel_sessions]
+    for s_serial, s_parallel in zip(serial_sessions, parallel_sessions, strict=True):
+        assert s_serial.source_id == s_parallel.source_id
+        assert graph_to_dict(s_serial.graph) == graph_to_dict(s_parallel.graph)
+
+
+def test_find_weka_predecessors_matches_generic_finder() -> None:
+    """_find_weka_predecessors must reproduce find_predecessors_by_text_matching
+    exactly (dependency types, dict insertion order, exact-match cache,
+    temporal fallbacks) across the tricky text-matching edge cases."""
+    from inference_perf.datagen.replay.otel_trace_to_replay_graph import (
+        RawCall,
+        find_predecessors_by_text_matching,
+    )
+    from inference_perf.datagen.replay.replay_graph_types import ReplayMessage
+    from inference_perf.datagen.replay.weka_trace_replay_datagen import _find_weka_predecessors
+
+    def call(
+        call_id: str,
+        t_start: int,
+        t_end: int,
+        messages: list[tuple[str, str]],
+        out_text: str | None,
+    ) -> RawCall:
+        return RawCall(
+            call_id=call_id,
+            trace_id="t",
+            t_start_ms=t_start,
+            t_end_ms=t_end,
+            model="m",
+            messages=[ReplayMessage(role=r, text=c) for r, c in messages],
+            out_message=ReplayMessage(role="assistant", text=out_text) if out_text is not None else None,
+            prompt_tokens=10,
+            completion_tokens=5,
+            temperature=0.0,
+            max_tokens_recorded=5,
+        )
+
+    calls = [
+        # Chain: c0 -> c1 (exact match of c0's output as assistant message)
+        call("c0", 0, 100, [("user", "hello")], "alpha beta"),
+        call("c1", 150, 250, [("user", "hello"), ("assistant", "alpha beta"), ("user", "next")], "gamma"),
+        # Containment (not exact): c1's output "gamma" inside a longer assistant message
+        call("c2", 300, 400, [("user", "x"), ("assistant", "prefix gamma suffix")], ""),
+        # Empty output of c2 matches the FIRST assistant message of any later call
+        call("c3", 450, 500, [("assistant", "unrelated"), ("user", "y")], "does-not-appear"),
+        # No assistant messages at all: only temporal fallback applies
+        call("c4", 550, 600, [("user", "z")], "omega"),
+        # Duplicate output texts: both c5 and c6 emit "dup"; c7 contains it once
+        call("c5", 650, 700, [("user", "a")], "dup"),
+        call("c6", 750, 800, [("user", "b")], "dup"),
+        call("c7", 850, 900, [("user", "c"), ("assistant", "dup"), ("user", "d")], "tail"),
+        # Overlapping timing: starts before c7 ends -> temporal fallback skips c7
+        call("c8", 880, 950, [("user", "e"), ("assistant", "alpha beta")], None),
+        # Empty assistant message; empty out_text of c8... (None out -> no causal check)
+        call("c9", 1000, 1100, [("assistant", ""), ("user", "f")], "final"),
+    ]
+
+    expected_preds, expected_cache = find_predecessors_by_text_matching(calls)
+    actual_preds, actual_cache = _find_weka_predecessors(calls)
+
+    # Compare with order sensitivity: predecessor_event_ids ordering downstream
+    # follows dict insertion order.
+    assert [list(d.items()) for d in actual_preds] == [list(d.items()) for d in expected_preds]
+    assert actual_cache == expected_cache
+
+    # Sanity: the scenario actually exercised matches (chain, containment, dup).
+    assert any(d for d in expected_preds), "expected at least one dependency"
+    assert expected_cache, "expected at least one exact-match cache entry"
+
+
+def test_find_weka_predecessors_matches_generic_finder_randomized() -> None:
+    """Differential fuzz over randomly generated call lists.
+
+    The hand-written scenario above covers the cases we thought of; this covers
+    the ones we did not. Short strings over a tiny alphabet so exact matches,
+    containment matches and duplicate outputs all collide frequently.
+    """
+    import random
+
+    from inference_perf.datagen.replay.otel_trace_to_replay_graph import (
+        RawCall,
+        find_predecessors_by_text_matching,
+    )
+    from inference_perf.datagen.replay.replay_graph_types import ReplayMessage
+    from inference_perf.datagen.replay.weka_trace_replay_datagen import _find_weka_predecessors
+
+    atoms = ["", "a", "b", "c", "ab", "ba", "bc", "abc", "aab"]
+
+    def rand_call(rng: random.Random, i: int) -> RawCall:
+        messages = [
+            ReplayMessage(role=rng.choice(["user", "assistant", "assistant", "system", "tool"]), text=rng.choice(atoms))
+            for _ in range(rng.randint(0, 4))
+        ]
+        out = ReplayMessage(role="assistant", text=rng.choice(atoms)) if rng.random() < 0.85 else None
+        # Overlapping call windows so the temporal fallback is exercised too.
+        t_start = i * 100 + rng.randint(-60, 60)
+        return RawCall(
+            call_id=f"c{i}",
+            trace_id="t",
+            t_start_ms=t_start,
+            t_end_ms=t_start + rng.randint(1, 150),
+            model="m",
+            messages=messages,
+            out_message=out,
+            prompt_tokens=1,
+            completion_tokens=1,
+            temperature=0.0,
+            max_tokens_recorded=1,
+        )
+
+    for seed in range(500):
+        rng = random.Random(seed)
+        calls = [rand_call(rng, i) for i in range(rng.randint(1, 9))]
+        expected_preds, expected_cache = find_predecessors_by_text_matching(calls)
+        actual_preds, actual_cache = _find_weka_predecessors(calls)
+        assert [list(d.items()) for d in actual_preds] == [list(d.items()) for d in expected_preds], f"seed={seed}"
+        assert actual_cache == expected_cache, f"seed={seed}"
+
+
+def test_find_weka_predecessors_defers_on_complex_outputs() -> None:
+    """A ComplexReplayMessage output must route through the generic finder:
+    the fast path implements only the plain-text CAUSAL_FULL_MATCH branch, and
+    handling it there would silently drop structured-match edges (e.g.
+    CAUSAL_TOOL_CALL_IDS_MATCHED)."""
+    from inference_perf.datagen.replay.otel_trace_to_replay_graph import (
+        DEPENDENCY_TYPE,
+        RawCall,
+        find_predecessors_by_text_matching,
+    )
+    from inference_perf.datagen.replay.replay_graph_types import ComplexReplayMessage, ReplayMessage
+    from inference_perf.datagen.replay.weka_trace_replay_datagen import _find_weka_predecessors
+
+    # c0's output is a structured tool call; c1 references its tool call ID in
+    # a structured message but never repeats the output text verbatim.
+    tool_call_out = ComplexReplayMessage(
+        role="assistant",
+        message_info={"parts": [{"type": "tool_call", "id": "tc_1", "content": "run"}], "parts_text": ["run"]},
+        raw_reconstructed_text="run",
+    )
+    tool_call_echo = ComplexReplayMessage(
+        role="assistant",
+        message_info={"tool_calls": [{"id": "tc_1"}]},
+        raw_reconstructed_text="different text",
+    )
+    calls = [
+        RawCall(
+            call_id="c0",
+            trace_id="t",
+            t_start_ms=0,
+            t_end_ms=100,
+            model="m",
+            messages=[ReplayMessage(role="user", text="go")],
+            out_message=tool_call_out,
+            prompt_tokens=1,
+            completion_tokens=1,
+            temperature=0.0,
+            max_tokens_recorded=1,
+        ),
+        RawCall(
+            call_id="c1",
+            trace_id="t",
+            t_start_ms=150,
+            t_end_ms=250,
+            model="m",
+            messages=[ReplayMessage(role="user", text="go"), tool_call_echo],
+            out_message=ReplayMessage(role="assistant", text="done"),
+            prompt_tokens=1,
+            completion_tokens=1,
+            temperature=0.0,
+            max_tokens_recorded=1,
+        ),
+    ]
+
+    expected_preds, expected_cache = find_predecessors_by_text_matching(calls)
+    actual_preds, actual_cache = _find_weka_predecessors(calls)
+
+    assert [list(d.items()) for d in actual_preds] == [list(d.items()) for d in expected_preds]
+    assert actual_cache == expected_cache
+    # Sanity: this scenario requires a structured-match branch the fast path
+    # does not implement, so the guard (not luck) produced the agreement.
+    assert expected_preds[1] == {0: DEPENDENCY_TYPE.CAUSAL_TOOL_CALL_IDS_MATCHED}
+
+
+def _write_mock_trace(tmp_path: Path, trace_id: str, hash_base: int) -> str:
+    trace_data = {
+        "id": trace_id,
+        "models": ["m"],
+        "block_size": 2,
+        "tool_tokens": 0,
+        "system_tokens": 0,
+        "requests": [
+            {"t": 0.1, "type": "n", "model": "m", "in": 4, "out": 2, "hash_ids": [hash_base, hash_base + 1], "api_time": 0.5},
+        ],
+    }
+    trace_file = tmp_path / f"{trace_id}.json"
+    trace_file.write_text(json.dumps(trace_data))
+    return str(trace_file)
+
+
+def _mock_tokenizer() -> MagicMock:
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_tokenizer().encode = lambda x: [9] * len(x)
+    mock_tokenizer.get_tokenizer().decode = lambda x: "".join(str(i) for i in x)
+    return mock_tokenizer
+
+
+def _subagent_session_trace() -> Dict[str, Any]:
+    def request(t: float, hash_id: int) -> Dict[str, Any]:
+        return {"t": t, "type": "n", "model": "m", "in": 4, "out": 2, "hash_ids": [hash_id, hash_id + 1], "api_time": 0.5}
+
+    return {
+        "id": "session_ids",
+        "models": ["m"],
+        "block_size": 2,
+        "requests": [
+            request(0.0, 10),
+            {
+                "t": 1.0,
+                "type": "subagent",
+                "agent_id": "alpha",
+                "subagent_type": "Subagent",
+                # Two overlapping calls form separate streams; the third rejoins s0.
+                "requests": [request(1.0, 20), request(1.1, 30), request(2.0, 40)],
+            },
+            {
+                "t": 3.0,
+                "type": "subagent",
+                "agent_id": "beta",
+                "subagent_type": "Subagent",
+                "requests": [request(3.0, 50)],
+            },
+            {"t": 4.0, "type": "subagent", "agent_id": "empty", "subagent_type": "Subagent", "requests": []},
+            request(5.0, 60),
+        ],
+    }
+
+
+def _session_id_generator(
+    tmp_path: Path, separate: Optional[bool], api_type: APIType = APIType.Chat
+) -> WekaTraceReplayDataGenerator:
+    trace_file = tmp_path / "session_ids.json"
+    trace_file.write_text(json.dumps(_subagent_session_trace()))
+    weka_cfg = WekaTraceReplayConfig(
+        trace_files=[str(trace_file)], datagen_workers=1, duplicate_sessions_target=3, ignore_trace_delays=True
+    )
+    if separate is not None:
+        weka_cfg.separate_subagent_session_ids = separate
+    return WekaTraceReplayDataGenerator(
+        api_config=APIConfig(type=api_type, streaming=False, session_id_header_key="x-session-id"),
+        config=DataConfig(type=DataGenType.WekaTraceReplay, weka_trace_replay=weka_cfg),
+        tokenizer=_mock_tokenizer(),
+        num_workers=1,
+    )
+
+
+@pytest.mark.parametrize("separate", [None, False, True], ids=["default", "disabled", "enabled"])
+@pytest.mark.parametrize("api_type", [APIType.Chat, APIType.AnthropicMessages])
+def test_weka_subagent_session_ids(tmp_path: Path, separate: Optional[bool], api_type: APIType) -> None:
+    gen = _session_id_generator(tmp_path, separate, api_type)
+    expected_suffixes = {
+        "parent_turn_0": "",
+        "parent_turn_1": "",
+        "sa_alpha_s0_turn_0": "::sa:alpha:s0",
+        "sa_alpha_s0_turn_1": "::sa:alpha:s0",
+        "sa_alpha_s1_turn_0": "::sa:alpha:s1",
+        "sa_beta_s0_turn_0": "::sa:beta:s0",
+    }
+    child_ids: set[str] = set()
+    assert gen.get_session_count() == 3
+    original = gen._get_session(0)
+    for idx in range(gen.get_session_count()):
+        session = gen._get_session(idx)
+        assert session.session_id == "wekatrace0_session_ids" + (f"_dup{idx}" if idx else "")
+        assert session.graph is original.graph
+        scheduled = gen.get_session_events(idx)
+        assert len(scheduled) == len(expected_suffixes)
+        for lazy_data in scheduled:
+            # Exercise the same wrapper used by loadgen workers. Routing identity
+            # must survive propagation of the scheduler's reporting identity.
+            lazy_data.session_id = session.session_id
+            request = LazyLoadDataMixin.get_request(gen, lazy_data)
+            assert isinstance(request, SessionChatCompletionAPIData)
+            assert lazy_data.session_id == session.session_id
+            assert request._extract_session_id() == session.session_id
+            assert request.graph_event_id is not None
+            call_id = session.graph.events[request.graph_event_id].call.call_id
+            suffix = expected_suffixes[call_id] if separate else ""
+            assert request.session_id == session.session_id
+            assert request.request_session_id == (session.session_id + suffix if suffix else None)
+            assert request.total_events_in_session == len(expected_suffixes)
+            if suffix:
+                assert request.request_session_id is not None
+                child_ids.add(request.request_session_id)
+    # Each of three replay sessions has three distinct child streams.
+    assert len(child_ids) == (9 if separate else 0)
+
+
+def test_weka_session_id_setting_preserves_graph_content(tmp_path: Path) -> None:
+    default_gen = _session_id_generator(tmp_path, None)
+    separated_gen = _session_id_generator(tmp_path, True)
+    default_graph = graph_to_dict(default_gen._get_session(0).graph)
+    separated_graph = graph_to_dict(separated_gen._get_session(0).graph)
+    for event in default_graph["events"].values():
+        assert "session_id_suffix" not in event["call"]
+    for event in separated_graph["events"].values():
+        call = event["call"]
+        if call["call_id"].startswith("sa_"):
+            assert call.pop("session_id_suffix").startswith("::sa:")
+        else:
+            assert "session_id_suffix" not in call
+    # Enabling request identity must preserve prompts, completions, timing,
+    # dependencies and deterministic synthesis (including partial-tail seeds).
+    assert separated_graph == default_graph
+
+
+def _build_generator(trace_files: list[str], datagen_workers: int, skip_invalid_files: bool) -> WekaTraceReplayDataGenerator:
+    from inference_perf.config.datagen.replay import WekaTraceReplayConfig
+
+    data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+    data_cfg.weka_trace_replay = WekaTraceReplayConfig(
+        trace_files=trace_files,
+        default_block_size=2,
+        datagen_workers=datagen_workers,
+        skip_invalid_files=skip_invalid_files,
+    )
+    return WekaTraceReplayDataGenerator(
+        api_config=APIConfig(type=APIType.Chat, streaming=False),
+        config=data_cfg,
+        tokenizer=_mock_tokenizer(),
+        num_workers=1,
+    )
+
+
+def test_weka_skip_invalid_files_through_parallel_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A trace that fails session building must be skipped (skip_invalid_files=True)
+    or fail the run (False), with the error marshaled across pool workers."""
+    from inference_perf.datagen.replay.otel_trace_to_replay_graph import build_graph as original_build_graph
+
+    good_files = [_write_mock_trace(tmp_path, f"good_{i}", 10 * (i + 1)) for i in range(3)]
+
+    # File-level parsing errors are caught in _load_weka_traces, so to exercise
+    # the session-build error path we make reconstruction itself raise for one
+    # trace ID via a patched build_graph.
+    def failing_build_graph(calls: object, source_file: str = "", **kwargs: object) -> object:
+        if "good_1" in source_file:
+            raise ValueError("synthetic reconstruction failure")
+        return original_build_graph(calls, source_file=source_file, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("inference_perf.datagen.replay.weka_trace_replay_datagen.build_graph", failing_build_graph)
+
+    # skip_invalid_files=True: the failing trace is dropped, the rest survive.
+    # datagen_workers=2 routes errors through the process-pool marshaling path.
+    gen = _build_generator(good_files, datagen_workers=2, skip_invalid_files=True)
+    assert len(gen.sessions) == 2
+    assert sorted(s.source_id for s in gen.sessions if s is not None) == ["good_0", "good_2"]
+
+    # skip_invalid_files=False: the run must fail and name the trace.
+    with pytest.raises(RuntimeError, match="good_1"):
+        _build_generator(good_files, datagen_workers=2, skip_invalid_files=False)
+
+
+def test_weka_resolve_datagen_workers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit datagen_workers is honored, capped at the trace count, and the
+    parallel path is restricted to Linux."""
+    import sys as sys_module
+
+    trace_files = [_write_mock_trace(tmp_path, f"t_{i}", 10 * (i + 1)) for i in range(2)]
+    gen = _build_generator(trace_files, datagen_workers=1, skip_invalid_files=False)
+
+    # Explicit value passes through; both are capped by the number of traces.
+    monkeypatch.setattr(sys_module, "platform", "linux")
+    gen.weka_config.datagen_workers = 5
+    assert gen._resolve_datagen_workers(num_traces=2) == 2
+    assert gen._resolve_datagen_workers(num_traces=10) == 5
+
+    gen.weka_config.datagen_workers = 1
+    assert gen._resolve_datagen_workers(num_traces=10) == 1
+
+    # Auto (None) resolves to at least 1 and never exceeds the trace count.
+    gen.weka_config.datagen_workers = None
+    assert 1 <= gen._resolve_datagen_workers(num_traces=3) <= 3
+
+    # Non-Linux platforms fall back to serial: fork is listed as available on
+    # macOS but is unsafe in multi-threaded processes.
+    monkeypatch.setattr(sys_module, "platform", "darwin")
+    gen.weka_config.datagen_workers = 5
+    assert gen._resolve_datagen_workers(num_traces=10) == 1
+
+
+def test_cgroup_cpu_limit(tmp_path: Path) -> None:
+    """CFS quota parsing for cgroup v2 and v1; unlimited/absent yields None."""
+    from inference_perf.datagen.replay.weka_trace_replay_datagen import _cgroup_cpu_limit
+
+    # No cgroup files at all.
+    assert _cgroup_cpu_limit(tmp_path / "missing") is None
+
+    # cgroup v2, limited: 250% of one CPU rounds up to 3.
+    v2 = tmp_path / "v2"
+    v2.mkdir()
+    (v2 / "cpu.max").write_text("250000 100000\n")
+    assert _cgroup_cpu_limit(v2) == 3
+
+    # cgroup v2, unlimited.
+    (v2 / "cpu.max").write_text("max 100000\n")
+    assert _cgroup_cpu_limit(v2) is None
+
+    # Sub-CPU quota clamps to 1 worker.
+    (v2 / "cpu.max").write_text("50000 100000\n")
+    assert _cgroup_cpu_limit(v2) == 1
+
+    # cgroup v1, limited.
+    v1 = tmp_path / "v1"
+    (v1 / "cpu").mkdir(parents=True)
+    (v1 / "cpu" / "cpu.cfs_quota_us").write_text("400000\n")
+    (v1 / "cpu" / "cpu.cfs_period_us").write_text("100000\n")
+    assert _cgroup_cpu_limit(v1) == 4
+
+    # cgroup v1, unlimited (quota -1).
+    (v1 / "cpu" / "cpu.cfs_quota_us").write_text("-1\n")
+    assert _cgroup_cpu_limit(v1) is None
+
+
+def _filter_trace(trace_id: str, peak_in: int, out: int = 2, subagent_in: int = 0) -> Dict[str, Any]:
+    requests: List[Dict[str, Any]] = [{"t": 0.1, "type": "n", "model": "m", "in": peak_in, "out": out, "hash_ids": [1]}]
+    if subagent_in:
+        requests.append(
+            {
+                "t": 0.2,
+                "type": "subagent",
+                "agent_id": "a1",
+                "subagent_type": "Subagent",
+                "requests": [{"t": 0.3, "type": "n", "model": "m", "in": subagent_in, "out": out, "hash_ids": [2]}],
+            }
+        )
+    return {"id": trace_id, "models": ["m"], "block_size": 2, "requests": requests}
+
+
+def _load_filtered(cfg: WekaTraceReplayConfig) -> List[WekaTrace]:
+    # trace loading reads only weka_config, so skip the tokenizer/corpus setup __init__ does
+    gen = WekaTraceReplayDataGenerator.__new__(WekaTraceReplayDataGenerator)
+    gen.weka_config = cfg
+    return WekaTraceReplayDataGenerator._load_weka_traces(gen)
+
+
+def _load_dir(
+    tmp_path: Path, traces: List[Dict[str, Any]], filter_expr: Optional[str], source: str = "trace_directory"
+) -> List[WekaTrace]:
+    paths = []
+    for i, trace in enumerate(traces):
+        p = tmp_path / f"trace_{i:03d}.json"
+        p.write_text(json.dumps(trace))
+        paths.append(str(p))
+    src: Dict[str, Any] = {"trace_directory": str(tmp_path)} if source == "trace_directory" else {"trace_files": paths}
+    return _load_filtered(WekaTraceReplayConfig(default_block_size=2, filter=filter_expr, **src))
+
+
+def test_augment_for_filter_derives_aggregates() -> None:
+    blob = _filter_trace("t1", peak_in=100, out=5, subagent_in=300)
+    blob["total_tokens"] = 999
+    augmented = WekaTraceReplayDataGenerator._augment_for_filter(blob)
+
+    assert augmented["max_tokens"] == 300 + 5
+    assert augmented["num_turns"] == 2
+    # derived values outrank a recorded key of the same name
+    assert augmented["total_tokens"] == 100 + 300 + 5 + 5
+
+
+def test_num_turns_counts_flattened_requests() -> None:
+    # a subagent's calls each count, so this must not collapse to top-level entries
+    blob = {
+        "id": "t1",
+        "models": ["m"],
+        "block_size": 2,
+        "requests": [
+            {"t": 0.1, "type": "n", "model": "m", "in": 10, "out": 1, "hash_ids": [1]},
+            {
+                "type": "subagent",
+                "agent_id": "a1",
+                "subagent_type": "Subagent",
+                "requests": [
+                    {"t": 0.2, "type": "n", "model": "m", "in": 20, "out": 2, "hash_ids": [2]},
+                    {"t": 0.3, "type": "n", "model": "m", "in": 30, "out": 3, "hash_ids": [3]},
+                    {"t": 0.4, "type": "n", "model": "m", "in": 40, "out": 4, "hash_ids": [4]},
+                ],
+            },
+        ],
+    }
+    assert WekaTraceReplayDataGenerator._augment_for_filter(blob)["num_turns"] == 4
+
+
+@pytest.mark.parametrize(
+    "filter_expr, expected",
+    [
+        (None, ["small", "big"]),
+        ("lambda x: x['max_tokens'] < 262144", ["small", "big"]),
+        ("lambda x: x['max_tokens'] < 200", ["small"]),
+        ("lambda x: x['max_tokens'] < 1", []),
+    ],
+)
+@pytest.mark.parametrize("source", ["trace_directory", "trace_files"])
+def test_filter_selects_traces(tmp_path: Path, filter_expr: Optional[str], expected: List[str], source: str) -> None:
+    traces = [_filter_trace("small", peak_in=100), _filter_trace("big", peak_in=500)]
+    assert [t.id for t in _load_dir(tmp_path, traces, filter_expr, source)] == expected
+
+
+def test_malformed_filter_expression_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Invalid filter expression syntax"):
+        _load_dir(tmp_path, [_filter_trace("a", peak_in=100)], "lambda x: (")
+
+
+@pytest.mark.parametrize("skip_invalid", [False, True])
+@pytest.mark.parametrize("source", ["trace_directory", "trace_files"])
+def test_filter_error_outranks_skip_invalid_files(tmp_path: Path, skip_invalid: bool, source: str) -> None:
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps(_filter_trace("a", peak_in=100)))
+    src: Dict[str, Any] = {"trace_directory": str(tmp_path)} if source == "trace_directory" else {"trace_files": [str(path)]}
+    cfg = WekaTraceReplayConfig(
+        default_block_size=2,
+        skip_invalid_files=skip_invalid,
+        filter="lambda x: x['benchmark'] == 'swebench'",
+        **src,
+    )
+    with pytest.raises(FilterExpressionError, match="benchmark"):
+        _load_filtered(cfg)
+
+
+@pytest.mark.parametrize("skip_invalid", [False, True])
+@pytest.mark.parametrize("source", ["trace_directory", "trace_files"])
+def test_malformed_trace_data_respects_skip_invalid_files(tmp_path: Path, skip_invalid: bool, source: str) -> None:
+    # schema-valid but not filter-arithmetic-safe: a data problem, not a filter one
+    trace = _filter_trace("a", peak_in=100)
+    trace["requests"][0]["in"] = "100"
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps(trace))
+    src: Dict[str, Any] = {"trace_directory": str(tmp_path)} if source == "trace_directory" else {"trace_files": [str(path)]}
+    cfg = WekaTraceReplayConfig(
+        default_block_size=2,
+        skip_invalid_files=skip_invalid,
+        filter="lambda x: x['max_tokens'] < 262144",
+        **src,
+    )
+    if skip_invalid:
+        assert _load_filtered(cfg) == []
+    else:
+        with pytest.raises(TypeError):
+            _load_filtered(cfg)
+
+
+@pytest.mark.parametrize("skip_invalid", [False, True])
+def test_filter_error_not_reported_as_dataset_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skip_invalid: bool
+) -> None:
+    from inference_perf.datagen.replay import weka_trace_replay_datagen as mod
+
+    jsonl = tmp_path / "traces.jsonl"
+    jsonl.write_text(json.dumps(_filter_trace("a", peak_in=100)))
+    monkeypatch.setattr(mod, "hf_hub_download", lambda **kwargs: str(jsonl))
+
+    cfg = WekaTraceReplayConfig(
+        hf_dataset_path="org/dataset",
+        default_block_size=2,
+        skip_invalid_files=skip_invalid,
+        filter="lambda x: x['benchmark'] == 'swebench'",
+    )
+    with pytest.raises(FilterExpressionError, match="benchmark"):
+        _load_filtered(cfg)
+
+
+def test_num_dataset_entries_counts_kept_traces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from inference_perf.datagen.replay import weka_trace_replay_datagen as mod
+
+    jsonl = tmp_path / "traces.jsonl"
+    jsonl.write_text("\n".join(json.dumps(_filter_trace(f"t{i}", peak_in=100 if i % 2 == 0 else 500)) for i in range(10)))
+    monkeypatch.setattr(mod, "hf_hub_download", lambda **kwargs: str(jsonl))
+
+    def load(num_entries: int, filter_expr: Optional[str]) -> List[str]:
+        cfg = WekaTraceReplayConfig(
+            hf_dataset_path="org/dataset",
+            default_block_size=2,
+            num_dataset_entries=num_entries,
+            filter=filter_expr,
+        )
+        return [t.id for t in _load_filtered(cfg)]
+
+    assert load(3, None) == ["t0", "t1", "t2"]
+    # scans deeper to fill the quota from accepted traces
+    assert load(3, "lambda x: x['max_tokens'] < 200") == ["t0", "t2", "t4"]
+    assert len(load(99, "lambda x: x['max_tokens'] < 200")) == 5
