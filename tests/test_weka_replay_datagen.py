@@ -969,3 +969,179 @@ def test_num_dataset_entries_counts_kept_traces(tmp_path: Path, monkeypatch: pyt
     # scans deeper to fill the quota from accepted traces
     assert load(3, "lambda x: x['max_tokens'] < 200") == ["t0", "t2", "t4"]
     assert len(load(99, "lambda x: x['max_tokens'] < 200")) == 5
+
+
+def test_hash_id_random_generator_global_scope() -> None:
+    rng_a = HashIdRandomGenerator(base_seed=42, global_hash_scope=True)
+    rng_a.set_trace_id("session_alpha")
+    rng_a.reseed_for_hash_id(7)
+    draws_a = [rng_a.randrange(1_000_000) for _ in range(4)]
+
+    rng_b = HashIdRandomGenerator(base_seed=42, global_hash_scope=True)
+    rng_b.set_trace_id("session_beta")
+    rng_b.reseed_for_hash_id(7)
+    draws_b = [rng_b.randrange(1_000_000) for _ in range(4)]
+
+    assert draws_a == draws_b
+
+    rng_local_b = HashIdRandomGenerator(base_seed=42, global_hash_scope=False)
+    rng_local_b.set_trace_id("session_beta")
+    rng_local_b.reseed_for_hash_id(7)
+    draws_local_b = [rng_local_b.randrange(1_000_000) for _ in range(4)]
+    assert draws_local_b != draws_a
+
+
+def test_global_hash_scope_cross_session_prefix(tmp_path: Path) -> None:
+    traces_payload = [
+        {
+            "id": "session_one",
+            "models": ["qwen-model"],
+            "block_size": 4,
+            "system_tokens": 8,
+            "requests": [
+                {
+                    "t": 0.0,
+                    "type": "s",
+                    "model": "qwen-model",
+                    "in": 12,
+                    "out": 4,
+                    "hash_ids": [1, 2, 10],
+                    "api_time": 0.2,
+                }
+            ],
+        },
+        {
+            "id": "session_two",
+            "models": ["qwen-model"],
+            "block_size": 4,
+            "system_tokens": 8,
+            "requests": [
+                {
+                    "t": 0.1,
+                    "type": "s",
+                    "model": "qwen-model",
+                    "in": 12,
+                    "out": 4,
+                    "hash_ids": [1, 2, 20],
+                    "api_time": 0.2,
+                }
+            ],
+        },
+    ]
+    for item in traces_payload:
+        (tmp_path / f"{item['id']}.json").write_text(json.dumps(item), encoding="utf-8")
+
+    # Distinct per-position token IDs so corpus slices at different offsets never collide.
+    mock_tok = MagicMock()
+    mock_tok.get_tokenizer().encode = lambda text: list(range(len(text)))
+    mock_tok.get_tokenizer().decode = lambda toks: " ".join(f"tok_{t}" for t in toks)
+
+    def _run_with_scope(global_scope: bool) -> Dict[str, List[Dict[str, str]]]:
+        data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+        data_cfg.weka_trace_replay = WekaTraceReplayConfig(
+            trace_directory=str(tmp_path),
+            default_block_size=4,
+            global_hash_scope=global_scope,
+            datagen_workers=1,
+        )
+        gen = WekaTraceReplayDataGenerator(
+            api_config=APIConfig(type=APIType.Chat, streaming=True),
+            config=data_cfg,
+            tokenizer=mock_tok,
+            base_seed=1234,
+            num_workers=1,
+        )
+        by_source: Dict[str, List[Dict[str, str]]] = {}
+        for idx in range(len(gen.sessions)):
+            sess = gen._get_session(idx)
+            ev0 = sorted(sess.graph.events.values(), key=lambda e: e.t_start_ms)[0]
+            by_source[sess.source_id] = [{"role": str(msg["role"]), "text": str(msg["content"])} for msg in ev0.call.messages]
+        return by_source
+
+    scoped = _run_with_scope(True)
+    assert scoped["session_one"][0]["role"] == "system"
+    assert scoped["session_two"][0]["role"] == "system"
+    assert scoped["session_one"][0]["text"] == scoped["session_two"][0]["text"]
+    assert scoped["session_one"][1]["role"] == "user"
+    assert scoped["session_two"][1]["role"] == "user"
+    assert scoped["session_one"][1]["text"] != scoped["session_two"][1]["text"]
+
+    per_session = _run_with_scope(False)
+    assert per_session["session_one"][0]["text"] != per_session["session_two"][0]["text"]
+
+
+def test_weka_subagent_streaming_requests_supported(tmp_path: Path) -> None:
+    trace_payload = {
+        "id": "subagent_streaming_trace",
+        "models": ["qwen-model"],
+        "block_size": 2,
+        "system_tokens": 4,
+        "requests": [
+            {
+                "t": 0.0,
+                "type": "s",
+                "model": "qwen-model",
+                "in": 6,
+                "out": 2,
+                "hash_ids": [1, 2, 3],
+                "api_time": 0.3,
+                "ttft": 0.05,
+            },
+            {
+                "t": 0.4,
+                "type": "subagent",
+                "agent_id": "explorer",
+                "subagent_type": "Explore",
+                "duration_ms": 600,
+                "system_tokens": 4,
+                "requests": [
+                    {
+                        "t": 0.4,
+                        "type": "s",
+                        "model": "qwen-model",
+                        "in": 6,
+                        "out": 2,
+                        "hash_ids": [1, 2, 9],
+                        "api_time": 0.25,
+                        "ttft": 0.04,
+                    },
+                    {
+                        "t": 0.7,
+                        "type": "n",
+                        "model": "qwen-model",
+                        "in": 10,
+                        "out": 2,
+                        "hash_ids": [1, 2, 9, 10, 11],
+                        "api_time": 0.3,
+                    },
+                ],
+            },
+        ],
+    }
+    trace_path = tmp_path / "sa_stream.json"
+    trace_path.write_text(json.dumps(trace_payload), encoding="utf-8")
+
+    mock_tok = MagicMock()
+    mock_tok.get_tokenizer().encode = lambda text: list(range(len(text)))
+    mock_tok.get_tokenizer().decode = lambda toks: " ".join(f"tok_{t}" for t in toks)
+
+    data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+    data_cfg.weka_trace_replay = WekaTraceReplayConfig(
+        trace_files=[str(trace_path)],
+        default_block_size=2,
+        separate_subagent_session_ids=True,
+        global_hash_scope=True,
+        datagen_workers=1,
+    )
+    gen = WekaTraceReplayDataGenerator(
+        api_config=APIConfig(type=APIType.Chat, streaming=True),
+        config=data_cfg,
+        tokenizer=mock_tok,
+        num_workers=1,
+    )
+    sess = gen._get_session(0)
+    events = sorted(sess.graph.events.values(), key=lambda e: e.t_start_ms)
+    assert len(events) == 3
+    sa_events = [e for e in events if e.call.call_id.startswith("sa_explorer_")]
+    assert len(sa_events) == 2
+    assert all(e.call.session_id_suffix == "::sa:explorer:s0" for e in sa_events)

@@ -306,6 +306,16 @@ class WekaTraceReplayConfig(SessionReplayConfig):
             "Defaults to False so all requests in a trace share the parent ID."
         ),
     )
+    global_hash_scope: bool = Field(
+        False,
+        description=(
+            "Seed KV-block token synthesis globally on (base_seed, hash_id) rather than "
+            "per-session on (base_seed, trace_id, hash_id). Enable for globally hash-scoped "
+            "datasets (e.g. epp-trace-compact output) so identical hash_ids across distinct "
+            "sessions synthesize byte-identical prompt blocks for cross-session prefix cache "
+            "sharing. Defaults to False to preserve per-session isolation on legacy traces."
+        ),
+    )
     trace_directory: Optional[str] = Field(None, description="Directory containing Weka JSON trace files")
     trace_files: Optional[List[str]] = Field(None, description="List of paths to specific Weka JSON trace files")
     hf_dataset_path: Optional[Union[str, Dict[str, Any]]] = Field(
