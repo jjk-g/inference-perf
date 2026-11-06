@@ -124,13 +124,19 @@ class WekaStreamingRequest(BaseModel):
     ttft: Optional[float] = None
 
 
+WekaLeafRequest = Annotated[Union[WekaNormalRequest, WekaStreamingRequest], Field(discriminator="type")]
+
+
 class WekaSubagentEntry(BaseModel):
     t: float
     type: Literal["subagent"]
     agent_id: str
-    subagent_type: str
+    subagent_type: str = "subagent"
+    status: str = "completed"
     duration_ms: Optional[int] = None
-    requests: List[WekaNormalRequest] = Field(default_factory=list)
+    total_tokens: Optional[int] = None
+    models: List[str] = Field(default_factory=list)
+    requests: List[WekaLeafRequest] = Field(default_factory=list)
     tool_tokens: int = 0
     system_tokens: int = 0
 
@@ -142,9 +148,11 @@ class WekaTrace(BaseModel):
     id: str
     models: List[str]
     block_size: int
+    hash_id_scope: Optional[str] = None
     tool_tokens: int = 0
     system_tokens: int = 0
     requests: List[WekaRequest]
+    totals: Optional[Dict[str, Any]] = None
 
 
 # =============================================================================
@@ -214,10 +222,11 @@ class _IdleGapTimeWarp:
 
 
 class HashIdRandomGenerator:
-    """Deterministic random generator scoped per (trace_id, hash_id)."""
+    """Deterministic random generator scoped per (trace_id, hash_id) or globally per hash_id."""
 
-    def __init__(self, base_seed: int):
+    def __init__(self, base_seed: int, global_hash_scope: bool = False):
         self.base_seed = base_seed
+        self.global_hash_scope = global_hash_scope
         self._trace_id: str = ""
         self._rng = random.Random()
 
@@ -225,7 +234,11 @@ class HashIdRandomGenerator:
         self._trace_id = trace_id
 
     def reseed_for_hash_id(self, hash_id: int) -> None:
-        seed_bytes = hashlib.sha256(f"{self.base_seed}:{self._trace_id}:{hash_id}".encode()).digest()
+        if self.global_hash_scope:
+            seed_str = f"{self.base_seed}:{hash_id}"
+        else:
+            seed_str = f"{self.base_seed}:{self._trace_id}:{hash_id}"
+        seed_bytes = hashlib.sha256(seed_str.encode()).digest()
         self._rng.seed(int.from_bytes(seed_bytes[:8], "big"))
 
     def randrange(self, stop: int) -> int:
@@ -485,7 +498,7 @@ class _ChildPlan:
     subagent_index: int
     entry: WekaSubagentEntry
     stream_index: int
-    stream_requests: List[WekaNormalRequest]
+    stream_requests: List[Union[WekaNormalRequest, WekaStreamingRequest]]
     block_size: int
 
 
@@ -502,15 +515,20 @@ def _sa_end_seconds(entry: WekaSubagentEntry) -> float:
     return entry.t + duration / 1000.0
 
 
-def _subagent_request_absolute_t(entry: WekaSubagentEntry, req: WekaNormalRequest) -> float:
+def _subagent_request_absolute_t(
+    entry: WekaSubagentEntry,
+    req: Union[WekaNormalRequest, WekaStreamingRequest],
+) -> float:
     if req.t + 1e-6 < entry.t:
         return entry.t + req.t
     return req.t
 
 
-def _pack_into_streams(requests: List[WekaNormalRequest]) -> List[List[WekaNormalRequest]]:
+def _pack_into_streams(
+    requests: List[Union[WekaNormalRequest, WekaStreamingRequest]],
+) -> List[List[Union[WekaNormalRequest, WekaStreamingRequest]]]:
     sorted_reqs = sorted(requests, key=lambda r: r.t)
-    streams: List[List[WekaNormalRequest]] = []
+    streams: List[List[Union[WekaNormalRequest, WekaStreamingRequest]]] = []
     stream_ends: List[float] = []
     for r in sorted_reqs:
         r_end = r.t + (r.api_time or 0.0)
@@ -1104,7 +1122,11 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         # draws without reseeding (randrange via sample_tokens_from_corpus,
         # or choice) would make results depend on draw order.
         cache: Dict[int, List[int]] = {}
-        hash_id_rng = HashIdRandomGenerator(self.base_seed)
+        effective_global_scope = bool(self.weka_config.global_hash_scope or getattr(trace, "hash_id_scope", None) == "global")
+        hash_id_rng = HashIdRandomGenerator(
+            self.base_seed,
+            global_hash_scope=effective_global_scope,
+        )
         hash_id_rng.set_trace_id(trace.id)
 
         # Build model mappings
