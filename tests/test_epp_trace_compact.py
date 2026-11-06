@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
+from pydantic import BaseModel, ConfigDict, Field
 import pytest
 
 from inference_perf.config import APIConfig, APIType, DataConfig, DataGenType
@@ -609,3 +610,462 @@ def test_uint53_bounds_null_hashes_and_cli_formats(tmp_path: Path) -> None:
     for bad_hash in (0, MAX_UINT53 + 1, True):
         with pytest.raises(ValueError):
             compact_events([_raw_event(hash_ids=[bad_hash])])
+
+
+class _AiperfStrictLeafRequest(BaseModel):
+    """Emulates aiperf 0.13.0 WekaNormalRequest / WekaStreamingRequest with ConfigDict(extra='forbid')."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    t: float
+    type: str
+    model: str
+    in_tokens: int = Field(alias="in")
+    out_tokens: int = Field(alias="out")
+    hash_ids: List[int] = Field(default_factory=list)
+    api_time: float | None = None
+    think_time: float | None = None
+    ttft: float | None = None
+
+
+class _AiperfStrictSubagentEntry(BaseModel):
+    """Emulates aiperf 0.13.0 WekaSubagentEntry with ConfigDict(extra='forbid')."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    t: float
+    type: str
+    agent_id: str
+    subagent_type: str
+    status: str
+    duration_ms: int | None = None
+    total_tokens: int | None = None
+    models: List[str]
+    requests: List[_AiperfStrictLeafRequest]
+    tool_tokens: int = 0
+    system_tokens: int = 0
+
+
+class _AiperfStrictWekaTrace(BaseModel):
+    """Emulates aiperf 0.13.0 WekaTrace with ConfigDict(extra='forbid')."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    id: str
+    models: List[str]
+    block_size: int
+    hash_id_scope: str | None = None
+    tool_tokens: int = 0
+    system_tokens: int = 0
+    requests: List[_AiperfStrictLeafRequest | _AiperfStrictSubagentEntry]
+    totals: Dict[str, Any] | None = None
+
+
+def test_aiperf_strict_schema_and_think_time_compatibility() -> None:
+    events = [
+        _raw_event(
+            session_id="s_aiperf",
+            t_recv_unix=100.0,
+            api_time_s=0.4,
+            ttft_s=0.05,
+            streaming=True,
+            model="Qwen/Qwen3-4B-Instruct-2507",
+            block_size=16,
+            in_tokens=64,
+            out_tokens=16,
+            hash_ids=[10, 20, 30, 40],
+        ),
+        _raw_event(
+            session_id="s_aiperf",
+            agent_id="sa_worker:s0",
+            subagent_type="Explore",
+            t_recv_unix=101.0,
+            api_time_s=0.3,
+            streaming=True,
+            model="Qwen/Qwen3-4B-Instruct-2507",
+            block_size=16,
+            in_tokens=48,
+            out_tokens=12,
+            hash_ids=[10, 20, 91],
+        ),
+        _raw_event(
+            session_id="s_aiperf",
+            agent_id="sa_worker:s1",
+            subagent_type="Explore",
+            t_recv_unix=101.5,
+            api_time_s=0.2,
+            streaming=True,
+            model="Qwen/Qwen3-4B-Instruct-2507",
+            block_size=16,
+            in_tokens=64,
+            out_tokens=8,
+            hash_ids=[10, 20, 91, 92],
+        ),
+        _raw_event(
+            session_id="s_aiperf",
+            t_recv_unix=102.5,
+            api_time_s=0.5,
+            ttft_s=0.06,
+            streaming=True,
+            model="Qwen/Qwen3-4B-Instruct-2507",
+            block_size=16,
+            in_tokens=96,
+            out_tokens=20,
+            hash_ids=[10, 20, 30, 40, 50, 60],
+        ),
+    ]
+
+    traces = compact_events(events)
+    assert len(traces) == 1
+    tr = traces[0]
+    assert tr.hash_id_scope == "global"
+    assert tr.totals == {
+        "parent_tokens": {"input": 160, "output": 36},
+        "subagent_tokens": {"input": 112, "output": 20},
+        "combined_tokens": {"input": 272, "output": 56},
+        "subagent_count": 1,
+    }
+
+    # Verify serialized JSON validates cleanly against aiperf 0.13.0 strict schema
+    serialized = tr.model_dump(by_alias=True, exclude_none=True)
+    strict_tr = _AiperfStrictWekaTrace.model_validate(serialized)
+    assert len(strict_tr.requests) == 3
+
+    parent0 = tr.requests[0]
+    sa_entry = tr.requests[1]
+    parent1 = tr.requests[2]
+    assert isinstance(parent0, WekaStreamingRequest)
+    assert isinstance(sa_entry, WekaSubagentEntry)
+    assert isinstance(parent1, WekaStreamingRequest)
+
+    assert parent0.think_time == 0.0
+    # parent1 arrives at t=2.5, parent0 ended at 0.0 + 0.4 = 0.4 -> think_time = 2.1
+    assert parent1.think_time == pytest.approx(2.1)
+
+    # Parallel stream suffixes (:s0, :s1) coalesced into single subagent entry "sa_worker"
+    assert sa_entry.agent_id == "sa_worker"
+    assert sa_entry.status == "completed"
+    assert sa_entry.models == ["Qwen/Qwen3-4B-Instruct-2507"]
+    assert sa_entry.total_tokens == 132
+    assert len(sa_entry.requests) == 2
+    assert all(r.t >= sa_entry.t for r in sa_entry.requests)
+    assert sa_entry.requests[0].think_time == 0.0
+    # second subagent turn at t=1.5, first ended at 1.0 + 0.3 = 1.3 -> think_time = 0.2
+    assert sa_entry.requests[1].think_time == pytest.approx(0.2)
+
+
+def test_transitive_subagent_resolution_and_dual_producer_ingestion() -> None:
+    # Transitive chain: S2 -> S1 -> Root, plus cycle guard C1 <-> C2, using Yang's CapturedRecord format
+    records: List[Dict[str, Any]] = [
+        {
+            "schema_version": "llm-d-trace-capture/v1",
+            "capture_run_id": "run_abc123",
+            "request_id": "req_root_0",
+            "session_id": "sess_root",
+            "arrival_unix_ns": 1_700_000_000_000_000_000,
+            "ttft_s": 0.05,
+            "api_time_s": 0.4,
+            "type": "s",
+            "model": "Qwen/Qwen3-4B-Instruct-2507",
+            "block_size": 16,
+            "tokenized_in": 64,
+            "usage_in": 64,
+            "cached_tokens": 32,
+            "out": 16,
+            "max_output_tokens": 256,
+            "has_tools": True,
+            "outcome": "completed",
+            "block_hashes": [
+                "00000000000000010000000000000001",
+                "00000000000000020000000000000002",
+                "00000000000000030000000000000003",
+                "00000000000000040000000000000004",
+            ],
+        },
+        # S1 -> sess_root
+        {
+            "schema_version": "llm-d-trace-capture/v1",
+            "capture_run_id": "run_abc123",
+            "request_id": "req_s1_0",
+            "session_id": "sess_s1",
+            "parent_session_id": "sess_root",
+            "subagent_id": "agent_depth1",
+            "arrival_unix_ns": 1_700_000_001_000_000_000,
+            "api_time_s": 0.3,
+            "type": "s",
+            "model": "Qwen/Qwen3-4B-Instruct-2507",
+            "block_size": 16,
+            "tokenized_in": 48,
+            "out": 12,
+            "outcome": "completed",
+            "block_hashes": [
+                "00000000000000010000000000000001",
+                "00000000000000020000000000000002",
+                "00000000000000110000000000000011",
+            ],
+        },
+        # S2 -> S1 -> sess_root (depth-2 subagent!)
+        {
+            "schema_version": "llm-d-trace-capture/v1",
+            "capture_run_id": "run_abc123",
+            "request_id": "req_s2_0",
+            "session_id": "sess_s2",
+            "parent_session_id": "sess_s1",
+            "subagent_id": "agent_depth2",
+            "arrival_unix_ns": 1_700_000_002_000_000_000,
+            "api_time_s": 0.25,
+            "type": "n",
+            "model": "Qwen/Qwen3-4B-Instruct-2507",
+            "block_size": 16,
+            "tokenized_in": 0,
+            "usage_in": 32,
+            "out": 10,
+            "outcome": "completed",
+            "block_hashes": [
+                "00000000000000010000000000000001",
+                "00000000000000220000000000000022",
+            ],
+        },
+        # Duplicate request_id must be deduplicated
+        {
+            "schema_version": "llm-d-trace-capture/v1",
+            "capture_run_id": "run_abc123",
+            "request_id": "req_s2_0",
+            "session_id": "sess_s2",
+            "parent_session_id": "sess_s1",
+            "subagent_id": "agent_depth2",
+            "arrival_unix_ns": 1_700_000_002_000_000_000,
+            "api_time_s": 0.25,
+            "type": "n",
+            "model": "Qwen/Qwen3-4B-Instruct-2507",
+            "block_size": 16,
+            "tokenized_in": 32,
+            "out": 10,
+            "outcome": "completed",
+            "block_hashes": [
+                "00000000000000010000000000000001",
+                "00000000000000220000000000000022",
+            ],
+        },
+        # Non-completed record dropped by default
+        {
+            "schema_version": "llm-d-trace-capture/v1",
+            "capture_run_id": "run_abc123",
+            "request_id": "req_cancelled",
+            "session_id": "sess_root",
+            "arrival_unix_ns": 1_700_000_003_000_000_000,
+            "api_time_s": 0.1,
+            "type": "s",
+            "model": "Qwen/Qwen3-4B-Instruct-2507",
+            "block_size": 16,
+            "tokenized_in": 64,
+            "out": 0,
+            "outcome": "cancelled",
+            "block_hashes": [],
+        },
+    ]
+
+    traces = compact_events(records)
+    assert len(traces) == 1
+    tr = traces[0]
+    assert tr.id == "sess_root"
+    sa_entries = [r for r in tr.requests if isinstance(r, WekaSubagentEntry)]
+    assert len(sa_entries) == 2
+    assert [sa.agent_id for sa in sa_entries] == ["agent_depth1", "agent_depth2"]
+    assert sa_entries[1].requests[0].input_length == 32  # fallback from usage_in when tokenized_in == 0
+
+
+def test_target_block_size_downsampling_and_drop_classifier_calls() -> None:
+    events = [
+        # Classifier call: max_output_tokens <= 64 and has_tools == False -> dropped when drop_classifier_calls=True
+        {
+            **_raw_event(
+                session_id="s_ds",
+                t_recv_unix=10.0,
+                block_size=16,
+                in_tokens=64,
+                out_tokens=8,
+                has_tools=False,
+                hash_ids=[11, 12, 13, 14],
+            ),
+            "max_output_tokens": 32,
+        },
+        # Tool call with max_output_tokens <= 64 but has_tools == True -> retained!
+        {
+            **_raw_event(
+                session_id="s_ds",
+                t_recv_unix=11.0,
+                block_size=16,
+                in_tokens=144,  # 9 blocks of 16 tokens -> 2 full blocks of 64 tokens
+                out_tokens=16,
+                has_tools=True,
+                hash_ids=[101, 102, 103, 104, 201, 202, 203, 204, 301],
+            ),
+            "max_output_tokens": 32,
+        },
+        # Normal turn with 8 blocks of 16 tokens (sharing first 4 blocks with prior turn)
+        {
+            **_raw_event(
+                session_id="s_ds",
+                t_recv_unix=12.0,
+                block_size=16,
+                in_tokens=128,
+                out_tokens=24,
+                has_tools=False,
+                hash_ids=[101, 102, 103, 104, 401, 402, 403, 404],
+            ),
+            "max_output_tokens": 512,
+        },
+    ]
+
+    traces = compact_events(events, target_block_size=64, drop_classifier_calls=True)
+    assert len(traces) == 1
+    tr = traces[0]
+    assert tr.block_size == 64
+    assert len(tr.requests) == 2
+    r0 = tr.requests[0]
+    r1 = tr.requests[1]
+    assert isinstance(r0, WekaStreamingRequest)
+    assert isinstance(r1, WekaStreamingRequest)
+    # Downsampled k=4 selects indices 3 and 7 (which were raw 104 and 204 / 404).
+    # Since both turns share raw index 3 (104), their first mapped hash_id must be identical!
+    assert len(r0.hash_ids) == 2
+    assert len(r1.hash_ids) == 2
+    assert r0.hash_ids[0] == r1.hash_ids[0]
+    assert r0.hash_ids[1] != r1.hash_ids[1]
+
+    # Non-multiple target_block_size raises ValueError
+    with pytest.raises(ValueError, match="integer multiple"):
+        compact_events(events, target_block_size=24)
+
+
+def test_hash_id_scope_local_vs_global_and_auto_detection(tmp_path: Path) -> None:
+    events = [
+        _raw_event(
+            session_id="s_loc_0",
+            t_recv_unix=100.0,
+            block_size=8,
+            in_tokens=16,
+            out_tokens=8,
+            hash_ids=[500, 600],
+        ),
+        _raw_event(
+            session_id="s_loc_1",
+            t_recv_unix=101.0,
+            block_size=8,
+            in_tokens=16,
+            out_tokens=8,
+            hash_ids=[700, 800],
+        ),
+    ]
+
+    local_traces = compact_events(events, hash_id_scope="local")
+    assert all(t.hash_id_scope == "local" for t in local_traces)
+    # Under local scope, both traces start their hash_ids at [1, 2]!
+    for t in local_traces:
+        req = t.requests[0]
+        assert isinstance(req, WekaStreamingRequest)
+        assert req.hash_ids == [1, 2]
+
+    # Under global scope, s_loc_0 gets [1, 2] and s_loc_1 gets [3, 4], and WekaTraceReplayDataGenerator
+    # automatically enables global_hash_scope when trace.hash_id_scope == "global" even if config.global_hash_scope=False!
+    shared_events = [
+        _raw_event(
+            session_id="s_glob_0",
+            t_recv_unix=200.0,
+            block_size=8,
+            in_tokens=24,
+            out_tokens=8,
+            has_system_prompt=True,
+            hash_ids=[901, 902, 1001],
+        ),
+        _raw_event(
+            session_id="s_glob_1",
+            t_recv_unix=201.0,
+            block_size=8,
+            in_tokens=24,
+            out_tokens=8,
+            has_system_prompt=True,
+            hash_ids=[901, 902, 1002],
+        ),
+    ]
+    seg_path = tmp_path / "glob.jsonl.gz"
+    out_dir = tmp_path / "glob_out"
+    _write_gzip_jsonl(seg_path, shared_events)
+    compact_trace_files([seg_path], out_dir, min_system_cohort=2, hash_id_scope="global")
+
+    mock_tok = MagicMock()
+    mock_tok.get_tokenizer().encode = lambda text: list(range(len(text)))
+    mock_tok.get_tokenizer().decode = lambda toks: " ".join(f"w{t}" for t in toks)
+
+    data_cfg = DataConfig(type=DataGenType.WekaTraceReplay)
+    # Leave global_hash_scope=False in config; trace.hash_id_scope == "global" must auto-enable it!
+    data_cfg.weka_trace_replay = WekaTraceReplayConfig(
+        trace_directory=str(out_dir),
+        default_block_size=8,
+        global_hash_scope=False,
+        datagen_workers=1,
+    )
+    gen = WekaTraceReplayDataGenerator(
+        api_config=APIConfig(type=APIType.Chat, streaming=True),
+        config=data_cfg,
+        tokenizer=mock_tok,
+        base_seed=77,
+        num_workers=1,
+    )
+    sys_prompts = {
+        str(sorted(gen._get_session(i).graph.events.values(), key=lambda e: e.t_start_ms)[0].call.messages[0]["content"])
+        for i in range(2)
+    }
+    assert len(sys_prompts) == 1
+
+
+def test_sessionless_lcp_chaining_and_max_idle_gap() -> None:
+    # Trajectory A (2 turns with 10/10 = 1.0 LCP overlap) + context compaction reset (< 0.90 overlap)
+    # + idle gap break when max_idle_gap_seconds is set.
+    base_blocks = list(range(1, 11))  # 10 blocks
+    turn1_blocks = base_blocks + [11, 12]  # LCP = 10/10 = 1.0 >= 0.90
+    compacted_blocks = list(range(1, 5)) + [99, 100]  # LCP = 4/12 = 0.333 < 0.90 -> starts new trajectory!
+    late_blocks = compacted_blocks + [101, 102]  # LCP = 6/6 = 1.0, but arrives 120s later
+
+    events = [
+        _raw_event(
+            session_id="req_0",
+            session_source="request_id",
+            t_recv_unix=1000.0,
+            api_time_s=1.0,
+            in_tokens=160,
+            hash_ids=base_blocks,
+        ),
+        _raw_event(
+            session_id="req_1",
+            session_source="request_id",
+            t_recv_unix=1005.0,
+            api_time_s=1.0,
+            in_tokens=192,
+            hash_ids=turn1_blocks,
+        ),
+        _raw_event(
+            session_id="req_2",
+            session_source="request_id",
+            t_recv_unix=1010.0,
+            api_time_s=1.0,
+            in_tokens=96,
+            hash_ids=compacted_blocks,
+        ),
+        _raw_event(
+            session_id="req_3",
+            session_source="request_id",
+            t_recv_unix=1135.0,
+            api_time_s=1.0,
+            in_tokens=128,
+            hash_ids=late_blocks,
+        ),
+    ]
+
+    # Unlimited idle gap (max_idle_gap_seconds=0): req_0+req_1 chain into 1 trace, req_2+req_3 chain into 2nd trace
+    traces_unlimited = compact_events(events, lcp_overlap_threshold=0.90, max_idle_gap_seconds=0.0)
+    assert len(traces_unlimited) == 2
+    assert [len(t.requests) for t in traces_unlimited] == [2, 2]
+
+    # With max_idle_gap_seconds=30.0: req_3 arrives 124s after req_2 finished -> starts 3rd trace!
+    traces_capped = compact_events(events, lcp_overlap_threshold=0.90, max_idle_gap_seconds=30.0)
+    assert len(traces_capped) == 3
+    assert [len(t.requests) for t in traces_capped] == [2, 1, 1]

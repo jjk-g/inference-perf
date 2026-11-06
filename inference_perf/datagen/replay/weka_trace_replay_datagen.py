@@ -131,8 +131,11 @@ class WekaSubagentEntry(BaseModel):
     t: float
     type: Literal["subagent"]
     agent_id: str
-    subagent_type: str
+    subagent_type: str = "subagent"
+    status: str = "completed"
     duration_ms: Optional[int] = None
+    total_tokens: Optional[int] = None
+    models: List[str] = Field(default_factory=list)
     requests: List[WekaLeafRequest] = Field(default_factory=list)
     tool_tokens: int = 0
     system_tokens: int = 0
@@ -145,9 +148,11 @@ class WekaTrace(BaseModel):
     id: str
     models: List[str]
     block_size: int
+    hash_id_scope: Optional[str] = None
     tool_tokens: int = 0
     system_tokens: int = 0
     requests: List[WekaRequest]
+    totals: Optional[Dict[str, Any]] = None
 
 
 # =============================================================================
@@ -1117,9 +1122,10 @@ class WekaTraceReplayDataGenerator(ReplayGraphSessionGeneratorBase):
         # draws without reseeding (randrange via sample_tokens_from_corpus,
         # or choice) would make results depend on draw order.
         cache: Dict[int, List[int]] = {}
+        effective_global_scope = bool(self.weka_config.global_hash_scope or getattr(trace, "hash_id_scope", None) == "global")
         hash_id_rng = HashIdRandomGenerator(
             self.base_seed,
-            global_hash_scope=self.weka_config.global_hash_scope,
+            global_hash_scope=effective_global_scope,
         )
         hash_id_rng.set_trace_id(trace.id)
 
